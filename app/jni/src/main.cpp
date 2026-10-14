@@ -72,6 +72,37 @@ int main(int argc, char* argv[]) {
         SDL_Log("AUDIO: load failed: %s", SDL_GetError());
     }
 
+    // Hitsound stream
+    SDL_AudioSpec hit_spec = {};
+    Uint8*  hit_data = nullptr;
+    Uint32  hit_len  = 0;
+    SDL_AudioStream* hit_stream = nullptr;
+    if (SDL_LoadWAV("/sdcard/Android/data/sh.ppy.osuvinniv/files/hit.wav",
+                    &hit_spec, &hit_data, &hit_len)) {
+        SDL_Log("HIT: loaded %d Hz, %d ch, %u bytes",
+                hit_spec.freq, hit_spec.channels, hit_len);
+        hit_stream = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &hit_spec, nullptr, nullptr);
+        if (hit_stream) SDL_ResumeAudioStreamDevice(hit_stream);
+        else SDL_Log("HIT: stream open failed: %s", SDL_GetError());
+    } else {
+        SDL_Log("HIT: load failed: %s", SDL_GetError());
+    }
+
+    SDL_AudioSpec miss_spec = {};
+    Uint8*  miss_data = nullptr;
+    Uint32  miss_len  = 0;
+    SDL_AudioStream* miss_stream = nullptr;
+    if (SDL_LoadWAV("/sdcard/Android/data/sh.ppy.osuvinniv/files/miss.wav",
+                    &miss_spec, &miss_data, &miss_len)) {
+        SDL_Log("MISS: loaded %d Hz, %u bytes", miss_spec.freq, miss_len);
+        miss_stream = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &miss_spec, nullptr, nullptr);
+        if (miss_stream) SDL_ResumeAudioStreamDevice(miss_stream);
+    } else {
+        SDL_Log("MISS: load failed: %s", SDL_GetError());
+    }
+
     const Uint64 audio_start_tick = SDL_GetTicks() + 2000;  // 2s lead-in
     bool audio_queued = false;
 
@@ -129,7 +160,6 @@ int main(int argc, char* argv[]) {
             hold_started[best_i] = true;
             hold_active[best_i]  = true;
             active_holds.push_back(best_i);
-            // note_judged stays false until the hold completes or breaks
         } else {
             note_judged[best_i] = true;
         }
@@ -139,6 +169,10 @@ int main(int argc, char* argv[]) {
         combo++;
         if (combo > max_combo) max_combo = combo;
         return true;
+    };
+
+    auto play_sound = [](SDL_AudioStream* s, Uint8* data, Uint32 len) {
+        if (s && data) SDL_PutAudioStreamData(s, data, (int)len);
     };
 
     Uint64 last_report = SDL_GetTicks();
@@ -169,6 +203,7 @@ int main(int argc, char* argv[]) {
                 else if (e.key.key == SDLK_K) col = 3;
                 if (col >= 0 && col < keys) {
                     column_pressed[col] = true;
+                    play_sound(hit_stream, hit_data, hit_len);
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -210,6 +245,7 @@ int main(int argc, char* argv[]) {
                             note_judged[hi]  = true;
                             cnt_miss++;
                             combo = 0;
+                            play_sound(miss_stream, miss_data, miss_len);
                         } else {
                             // Released cleanly at/after tail — LN resolves
                             hold_active[hi]  = false;
@@ -224,6 +260,7 @@ int main(int argc, char* argv[]) {
                 int col = find_col(e.button.x);
                 if (col >= 0) {
                     column_pressed[col] = true;
+                    play_sound(hit_stream, hit_data, hit_len);
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -279,6 +316,7 @@ int main(int argc, char* argv[]) {
                 note_judged[i] = true;
                 cnt_miss++;
                 combo = 0;
+                play_sound(miss_stream, miss_data, miss_len);
             }
             miss_cursor++;
         }
@@ -388,6 +426,10 @@ int main(int argc, char* argv[]) {
 
     if (audio_stream) SDL_DestroyAudioStream(audio_stream);
     if (wav_data)     SDL_free(wav_data);
+    if (hit_stream)   SDL_DestroyAudioStream(hit_stream);
+    if (hit_data)     SDL_free(hit_data);
+    if (miss_stream)  SDL_DestroyAudioStream(miss_stream);
+    if (miss_data)    SDL_free(miss_data);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
