@@ -1,53 +1,43 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
-#include <GLES3/gl3.h>
 #include <cmath>
 #include "parser.h"
 
 int main(int argc, char* argv[]) {
     SDL_Log("OSUVINNIV_MAIN_ENTERED argc=%d", argc);
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
     }
 
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-
     SDL_Window* window = SDL_CreateWindow(
         "osu!vinniv",
         0, 0,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+        SDL_WINDOW_FULLSCREEN);
     if (!window) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         return 1;
     }
 
-    SDL_GLContext gl = SDL_GL_CreateContext(window);
-    if (!gl) {
-        SDL_Log("SDL_GL_CreateContext failed: %s", SDL_GetError());
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
+    if (!renderer) {
+        SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
         return 1;
     }
-
-    // Disable vsync so we measure raw loop throughput.
-    SDL_GL_SetSwapInterval(0);
-
-    SDL_Log("GL_VERSION:  %s", glGetString(GL_VERSION));
-    SDL_Log("GL_RENDERER: %s", glGetString(GL_RENDERER));
-    SDL_Log("GL_VENDOR:   %s", glGetString(GL_VENDOR));
+    SDL_SetRenderVSync(renderer, 0);
 
     int win_w = 0, win_h = 0;
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
     SDL_Log("Window size: %dx%d", win_w, win_h);
 
+    Beatmap map;
     {
-        Beatmap map;
         const char* map_path = "/sdcard/Android/data/sh.ppy.osuvinniv/files/map.osu";
         if (parse_osu_file(map_path, map)) {
             SDL_Log("MAP: %s - %s [%s]", map.artist.c_str(), map.title.c_str(), map.version.c_str());
-            SDL_Log("  keys=%d  notes=%zu", map.key_count, map.notes.size());
+            SDL_Log("  keys=%d  bpm=%.1f  notes=%zu", map.key_count, map.bpm, map.notes.size());
             int holds = 0;
             for (const auto& n : map.notes) if (n.is_hold) holds++;
             SDL_Log("  taps=%zu  holds=%d", map.notes.size() - holds, holds);
@@ -81,18 +71,59 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Cycle hue so we can see it's alive.
-        float t = SDL_GetTicks() / 1000.0f;
-        float r = 0.5f + 0.5f * sinf(t);
-        float g = 0.5f + 0.5f * sinf(t + 2.094f);
-        float b = 0.5f + 0.5f * sinf(t + 4.188f);
-
         SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
-        glViewport(0, 0, win_w, win_h);
-        glClearColor(r, g, b, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
 
-        SDL_GL_SwapWindow(window);
+        // Playfield layout
+        const float judgement_y = win_h * 0.85f;
+        const int   keys        = (map.key_count > 0) ? map.key_count : 4;
+        const float max_col_w   = 120.0f;   // cap column width
+        const float col_w_raw   = (float)win_w / keys;
+        const float col_w       = (col_w_raw > max_col_w) ? max_col_w : col_w_raw;
+        const float playfield_w = col_w * keys;
+        const float playfield_x = ((float)win_w - playfield_w) * 0.5f;
+        const float scroll_pps  = 1.5f;
+        const double now_ms     = (double)SDL_GetTicks();
+
+        // Background
+        SDL_SetRenderDrawColor(renderer, 20, 20, 30, 255);
+        SDL_RenderClear(renderer);
+
+        // Column separators
+        SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
+        for (int c = 1; c < keys; c++) {
+            float x = playfield_x + c * col_w;
+            SDL_RenderLine(renderer, x, 0, x, (float)win_h);
+        }
+
+        // Judgement line
+        SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
+        SDL_RenderLine(renderer, playfield_x, judgement_y, playfield_x + playfield_w, judgement_y);
+
+        // Notes
+        for (const auto& n : map.notes) {
+            float y = judgement_y - (float)((n.time - now_ms) * scroll_pps);
+            if (y < -50.0f || y > win_h + 50.0f) continue;
+            if (n.time > now_ms + 4000.0) break;   // notes sorted, stop early
+
+            float x = playfield_x + n.column * col_w;
+            float w = col_w - 4.0f;
+            float h = 24.0f;
+
+            if (n.is_hold) {
+                float y_end = judgement_y - (float)((n.end_time - now_ms) * scroll_pps);
+                float top = (y < y_end) ? y : y_end;
+                float bot = (y < y_end) ? y_end : y;
+                SDL_SetRenderDrawColor(renderer, 90, 180, 255, 255);
+                SDL_FRect body = { x + 2.0f, top, w, bot - top };
+                SDL_RenderFillRect(renderer, &body);
+            }
+
+            SDL_SetRenderDrawColor(renderer, 240, 240, 240, 255);
+            SDL_FRect r = { x + 2.0f, y - h * 0.5f, w, h };
+            SDL_RenderFillRect(renderer, &r);
+        }
+
+        SDL_RenderPresent(renderer);
 
         frames++;
         Uint64 now = SDL_GetTicks();
@@ -102,12 +133,10 @@ int main(int argc, char* argv[]) {
             frames = 0;
             last_report = now;
 
-            // Stop after 10 seconds so we get a bounded sample.
-            if (report_count >= 10) running = false;
+            // Auto-exit after 3 minutes for testing; remove later.
         }
     }
 
-    SDL_GL_DestroyContext(gl);
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 0;

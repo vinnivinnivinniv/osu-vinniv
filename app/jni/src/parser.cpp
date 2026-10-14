@@ -54,6 +54,20 @@ bool parse_osu_file(const std::string& path, Beatmap& out) {
             else if (k == "Version") out.version = v;
         }
 
+        else if (section == "TimingPoints") {
+            // Format: time,beatLength,meter,sampleSet,sampleIndex,volume,uninherited,effects
+            // We only use the first uninherited point (beatLength > 0).
+            std::vector<std::string> parts;
+            std::stringstream ss(t);
+            std::string p;
+            while (std::getline(ss, p, ',')) parts.push_back(p);
+            if (parts.size() >= 2 && out.bpm == 0.0) {
+                try {
+                    double beat_len = std::stod(parts[1]);
+                    if (beat_len > 0.0) out.bpm = 60000.0 / beat_len;
+                } catch (...) {}
+            }
+        }
         else if (section == "Difficulty") {
             auto pos = t.find(':');
             if (pos == std::string::npos) continue;
