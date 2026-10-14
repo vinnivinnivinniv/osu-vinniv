@@ -58,4 +58,7 @@ SDL/                 SDL3 (submodule, release-3.2.0)
 
 ## License
 
-TBD
+MIT. See [LICENSE](LICENSE).
+
+"osu!" and "ppy" are trademarks of ppy Pty Ltd. This is an independent
+community project, not affiliated with ppy.
