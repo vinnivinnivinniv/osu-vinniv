@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+app/build/
+*.iml
+local.properties
+
+# Native
+app/.cxx/
+app/build/intermediates/
+*.o
+*.a
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
