@@ -95,6 +95,10 @@ int main(int argc, char* argv[]) {
     int   cnt_300 = 0, cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
     std::vector<bool>   hold_active(map.notes.size(), false);
+    std::vector<bool>   hold_started(map.notes.size(), false);
+    std::vector<bool>   hold_broken(map.notes.size(), false);
+    std::vector<bool>   note_ghost(map.notes.size(), false);
+    std::vector<double> release_time(map.notes.size(), 0.0);
     std::vector<size_t> active_holds;
 
     // Multi-touch tracking
@@ -121,10 +125,13 @@ int main(int argc, char* argv[]) {
         if (best_i < 0) return false;
         double a = best < 0 ? -best : best;
         if (a > 70.0) return false;
-        note_judged[best_i] = true;
         if (map.notes[best_i].is_hold) {
-            hold_active[best_i] = true;
+            hold_started[best_i] = true;
+            hold_active[best_i]  = true;
             active_holds.push_back(best_i);
+            // note_judged stays false until the hold completes or breaks
+        } else {
+            note_judged[best_i] = true;
         }
         if      (a <= 22.0) cnt_300++;
         else if (a <= 45.0) cnt_100++;
@@ -194,11 +201,20 @@ int main(int argc, char* argv[]) {
                     for (size_t i = 0; i < active_holds.size(); ) {
                         size_t hi = active_holds[i];
                         if (map.notes[hi].column != release_col) { i++; continue; }
+                        release_time[hi] = now_map;
                         if (now_map < map.notes[hi].end_time - 150.0) {
-                            // Broken early
-                            hold_active[hi] = false;
+                            // Released early — break
+                            hold_active[hi]  = false;
+                            hold_broken[hi]  = true;
+                            note_ghost[hi]   = true;
+                            note_judged[hi]  = true;
                             cnt_miss++;
                             combo = 0;
+                        } else {
+                            // Released cleanly at/after tail — LN resolves
+                            hold_active[hi]  = false;
+                            note_judged[hi]  = true;
+                            // combo stays; tail is not a separate +1 in our scoring
                         }
                         active_holds.erase(active_holds.begin() + i);
                     }
@@ -243,7 +259,9 @@ int main(int argc, char* argv[]) {
             for (size_t i = 0; i < active_holds.size(); ) {
                 size_t hi = active_holds[i];
                 if (nmap > map.notes[hi].end_time) {
-                    hold_active[hi] = false;
+                    hold_active[hi]  = false;
+                    note_judged[hi]  = true;
+                    release_time[hi] = nmap;
                     active_holds.erase(active_holds.begin() + i);
                 } else i++;
             }
@@ -251,8 +269,14 @@ int main(int argc, char* argv[]) {
 
         while (miss_cursor < map.notes.size() &&
                map.notes[miss_cursor].time < now_ms - 70.0) {
-            if (!note_judged[miss_cursor]) {
-                note_judged[miss_cursor] = true;
+            size_t i = miss_cursor;
+            if (!note_judged[i] && !hold_started[i]) {
+                if (map.notes[i].is_hold) {
+                    hold_broken[i] = true;
+                    release_time[i] = now_ms;
+                }
+                note_ghost[i] = true;
+                note_judged[i] = true;
                 cnt_miss++;
                 combo = 0;
             }
@@ -285,26 +309,67 @@ int main(int argc, char* argv[]) {
         for (size_t ni = 0; ni < map.notes.size(); ni++) {
             const auto& n = map.notes[ni];
             if (note_judged[ni]) continue;
-            float y = judgement_y - (float)((n.time - now_ms) * scroll_pps);
-            if (y < -50.0f || y > win_h + 50.0f) continue;
             if (n.time > now_ms + 4000.0) break;   // notes sorted, stop early
+
+            // Render skip: resolved notes not marked ghost are gone.
+            if (note_judged[ni] && !note_ghost[ni]) continue;
+
+            // Killed LNs: broken or missed hold notes fade out 250ms after resolution.
+            if (n.is_hold && note_ghost[ni]) {
+                double since_release = now_ms - release_time[ni];
+                if (since_release > 250.0) continue;
+            }
+
+            float y = judgement_y - (float)((n.time - now_ms) * scroll_pps);
+            float y_end = n.is_hold
+                ? judgement_y - (float)((n.end_time - now_ms) * scroll_pps)
+                : y;
+
+            // Sticky head: while a hold is active, pin the head to the
+            // judgement line and let the body shrink from the bottom.
+            float head_y = y;
+            if (n.is_hold && hold_active[ni]) head_y = judgement_y;
+
+            float top = (head_y < y_end) ? head_y : y_end;
+            float bot = (head_y < y_end) ? y_end : head_y;
+            if (bot < -50.0f || top > win_h + 50.0f) continue;
 
             float x = playfield_x + n.column * col_w;
             float w = col_w - 4.0f;
             float h = 24.0f;
 
-            if (n.is_hold) {
-                float y_end = judgement_y - (float)((n.end_time - now_ms) * scroll_pps);
-                float top = (y < y_end) ? y : y_end;
-                float bot = (y < y_end) ? y_end : y;
-                SDL_SetRenderDrawColor(renderer, 90, 180, 255, 255);
-                SDL_FRect body = { x + 2.0f, top, w, bot - top };
-                SDL_RenderFillRect(renderer, &body);
+            // Color scheme by state — mono cap color, shared by head and tail.
+            Uint8 br = 90,  bg = 180, bb = 255, ba = 255;   // body
+            Uint8 cr = 240, cg = 240, cb = 240, ca = 255;   // cap (head + tail)
+
+            if (note_ghost[ni]) {
+                br = 60;  bg = 65;  bb = 75;  ba = 90;
+                cr = 100; cg = 100; cb = 100; ca = 130;
+            } else if (hold_active[ni]) {
+                br = 130; bg = 220; bb = 255; ba = 255;
+                cr = 255; cg = 245; cb = 170; ca = 255;
             }
 
-            SDL_SetRenderDrawColor(renderer, 240, 240, 240, 255);
-            SDL_FRect r = { x + 2.0f, y - h * 0.5f, w, h };
-            SDL_RenderFillRect(renderer, &r);
+            if (n.is_hold) {
+                // Body
+                SDL_SetRenderDrawColor(renderer, br, bg, bb, ba);
+                SDL_FRect body = { x + 2.0f, top, w, bot - top };
+                SDL_RenderFillRect(renderer, &body);
+
+                // Tail cap — same color as head, drawn only if on screen.
+                if (y_end > -50.0f && y_end < win_h + 50.0f) {
+                    SDL_SetRenderDrawColor(renderer, cr, cg, cb, ca);
+                    SDL_FRect tail = { x + 2.0f, y_end - h * 0.5f, w, h };
+                    SDL_RenderFillRect(renderer, &tail);
+                }
+            }
+
+            // Head cap (skip if scrolled off)
+            if (head_y > -50.0f && head_y < win_h + 50.0f) {
+                SDL_SetRenderDrawColor(renderer, cr, cg, cb, ca);
+                SDL_FRect r = { x + 2.0f, head_y - h * 0.5f, w, h };
+                SDL_RenderFillRect(renderer, &r);
+            }
         }
 
         SDL_RenderPresent(renderer);

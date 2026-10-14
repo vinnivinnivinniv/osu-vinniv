@@ -95,12 +95,15 @@ bool parse_osu_file(const std::string& path, Beatmap& out) {
             } catch (...) { continue; }
 
             if (n.is_hold && parts.size() >= 6) {
+                // Field 5 is "endTime:hitSample" — endTime is the first
+                // colon-delimited value.
                 const std::string& tail = parts[5];
-                auto epos = tail.find("endTime:");
-                if (epos != std::string::npos) {
-                    try { n.end_time = std::stod(tail.substr(epos + 8)); }
-                    catch (...) {}
-                }
+                auto colon = tail.find(':');
+                std::string endStr = (colon == std::string::npos)
+                                     ? tail
+                                     : tail.substr(0, colon);
+                try { n.end_time = std::stod(endStr); }
+                catch (...) { n.end_time = n.time; }
             }
             out.notes.push_back(n);
         }
