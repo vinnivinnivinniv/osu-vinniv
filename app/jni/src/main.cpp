@@ -121,22 +121,16 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                float tx = (e.type == SDL_EVENT_FINGER_DOWN) ? e.tfinger.x * win_w : e.button.x;
-                int keys_ = (map.key_count > 0) ? map.key_count : 4;
-                float cw = (float)win_w / keys_;
-                float maxw = 120.0f;
-                if (cw > maxw) cw = maxw;
-                float pw = cw * keys_;
-                float px = ((float)win_w - pw) * 0.5f;
-                int col = (int)((tx - px) / cw);
-                if (col >= 0 && col < keys_ && col < 16) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                double t = (double)SDL_GetTicks();
+                int col = (int)((e.button.x - playfield_x) / col_w);
+                if (col >= 0 && col < keys && col < 16) {
                     column_pressed[col] = true;
                     double best = 1e9; int best_i = -1;
                     for (size_t i = 0; i < map.notes.size(); i++) {
                         if (note_judged[i]) continue;
                         if (map.notes[i].column != col) continue;
-                        double d = map.notes[i].time - (double)SDL_GetTicks();
+                        double d = map.notes[i].time - t;
                         if (d < -80.0) continue;
                         if (d < best) { best = d; best_i = (int)i; }
                         if (d > 80.0) break;
@@ -154,16 +148,9 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                float tx = (e.type == SDL_EVENT_FINGER_UP) ? e.tfinger.x * win_w : e.button.x;
-                int keys_ = (map.key_count > 0) ? map.key_count : 4;
-                float cw = (float)win_w / keys_;
-                float maxw = 120.0f;
-                if (cw > maxw) cw = maxw;
-                float pw = cw * keys_;
-                float px = ((float)win_w - pw) * 0.5f;
-                int col = (int)((tx - px) / cw);
-                if (col >= 0 && col < keys_ && col < 16) column_pressed[col] = false;
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                int col = (int)((e.button.x - playfield_x) / col_w);
+                if (col >= 0 && col < keys && col < 16) column_pressed[col] = false;
             }
             if (e.type == SDL_EVENT_KEY_UP) {
                 if      (e.key.key == SDLK_D) column_pressed[0] = false;
