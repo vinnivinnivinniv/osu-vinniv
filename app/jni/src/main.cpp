@@ -7,6 +7,7 @@
 int main(int argc, char* argv[]) {
     SDL_Log("OSUVINNIV_MAIN_ENTERED argc=%d", argc);
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -56,7 +57,7 @@ int main(int argc, char* argv[]) {
 
     // Playfield geometry (needed by both event loop and draw block)
     const int   keys        = (map.key_count > 0) ? map.key_count : 4;
-    const float max_col_w   = 120.0f;
+    const float max_col_w   = 240.0f;
     const float col_w_raw   = (float)win_w / keys;
     const float col_w       = (col_w_raw > max_col_w) ? max_col_w : col_w_raw;
     const float playfield_w = col_w * keys;
