@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <cmath>
+#include <fstream>
 #include <vector>
 #include "parser.h"
 
@@ -55,6 +56,28 @@ int main(int argc, char* argv[]) {
     }
 
 
+    // ---- settings.ini ----
+    float cfg_music_vol    = 0.6f;
+    float cfg_hitsound_vol = 1.0f;
+    float cfg_scroll_speed = 1.5f;
+    {
+        std::ifstream sf("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini");
+        std::string line;
+        while (std::getline(sf, line)) {
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq);
+            std::string v = line.substr(eq + 1);
+            try {
+                if      (k == "music_volume")    cfg_music_vol    = std::stof(v);
+                else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
+                else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
+            } catch (...) {}
+        }
+        SDL_Log("CFG: music=%.2f hit=%.2f scroll=%.2f",
+                cfg_music_vol, cfg_hitsound_vol, cfg_scroll_speed);
+    }
+
     // Audio
     SDL_AudioSpec wav_spec = {};
     Uint8*  wav_data = nullptr;
@@ -66,8 +89,8 @@ int main(int argc, char* argv[]) {
                 wav_spec.freq, wav_spec.channels, wav_len);
         audio_stream = SDL_OpenAudioDeviceStream(
             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &wav_spec, nullptr, nullptr);
-        if (!audio_stream)
-            SDL_Log("AUDIO: stream open failed: %s", SDL_GetError());
+        if (audio_stream) SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
+        else SDL_Log("AUDIO: stream open failed: %s", SDL_GetError());
     } else {
         SDL_Log("AUDIO: load failed: %s", SDL_GetError());
     }
@@ -83,7 +106,10 @@ int main(int argc, char* argv[]) {
                 hit_spec.freq, hit_spec.channels, hit_len);
         hit_stream = SDL_OpenAudioDeviceStream(
             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &hit_spec, nullptr, nullptr);
-        if (hit_stream) SDL_ResumeAudioStreamDevice(hit_stream);
+        if (hit_stream) {
+            SDL_SetAudioStreamGain(hit_stream, cfg_hitsound_vol);
+            SDL_ResumeAudioStreamDevice(hit_stream);
+        }
         else SDL_Log("HIT: stream open failed: %s", SDL_GetError());
     } else {
         SDL_Log("HIT: load failed: %s", SDL_GetError());
@@ -98,7 +124,10 @@ int main(int argc, char* argv[]) {
         SDL_Log("MISS: loaded %d Hz, %u bytes", miss_spec.freq, miss_len);
         miss_stream = SDL_OpenAudioDeviceStream(
             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &miss_spec, nullptr, nullptr);
-        if (miss_stream) SDL_ResumeAudioStreamDevice(miss_stream);
+        if (miss_stream) {
+            SDL_SetAudioStreamGain(miss_stream, cfg_hitsound_vol);
+            SDL_ResumeAudioStreamDevice(miss_stream);
+        }
     } else {
         SDL_Log("MISS: load failed: %s", SDL_GetError());
     }
@@ -115,7 +144,7 @@ int main(int argc, char* argv[]) {
     const float col_w       = (col_w_raw > max_col_w) ? max_col_w : col_w_raw;
     const float playfield_w = col_w * keys;
     const float playfield_x = ((float)win_w - playfield_w) * 0.5f;
-    const float scroll_pps  = 1.5f;
+    const float scroll_pps  = cfg_scroll_speed;
     const float judgement_y = win_h * 0.85f;
 
     // Judgment state
@@ -136,6 +165,14 @@ int main(int argc, char* argv[]) {
     struct FingerSlot { SDL_FingerID id; int col; };
     std::vector<FingerSlot> active_fingers;
     active_fingers.reserve(10);
+
+    auto play_sound = [](SDL_AudioStream* s, Uint8* data, Uint32 len) {
+        if (!s || !data) return;
+        // Kill any queued samples so the newest press wins instead of
+        // stacking into a backlog. Matches the "override" feel.
+        SDL_ClearAudioStream(s);
+        SDL_PutAudioStreamData(s, data, (int)len);
+    };
 
     auto find_col = [&](float x) -> int {
         int c = (int)((x - playfield_x) / col_w);
@@ -171,9 +208,6 @@ int main(int argc, char* argv[]) {
         return true;
     };
 
-    auto play_sound = [](SDL_AudioStream* s, Uint8* data, Uint32 len) {
-        if (s && data) SDL_PutAudioStreamData(s, data, (int)len);
-    };
 
     Uint64 last_report = SDL_GetTicks();
     int frames = 0;
@@ -182,6 +216,25 @@ int main(int argc, char* argv[]) {
 
 
 
+
+    // ---- HUD texture (3x scale, cached) ----
+    const int   HUD_LOGICAL_W = 520;
+    const int   HUD_LOGICAL_H = 72;
+    const float HUD_SCALE     = 3.0f;
+    const int   HUD_TEX_W     = (int)(HUD_LOGICAL_W * HUD_SCALE);
+    const int   HUD_TEX_H     = (int)(HUD_LOGICAL_H * HUD_SCALE);
+
+    SDL_Texture* hud_tex = SDL_CreateTexture(
+        renderer, SDL_PIXELFORMAT_RGBA8888,
+        SDL_TEXTUREACCESS_TARGET, HUD_TEX_W, HUD_TEX_H);
+    if (hud_tex) SDL_SetTextureBlendMode(hud_tex, SDL_BLENDMODE_BLEND);
+    else SDL_Log("HUD: texture creation failed: %s", SDL_GetError());
+
+    int  hud_fps = 0;
+    int  hud_last_combo = -1, hud_last_max = -1;
+    int  hud_last_300 = -1, hud_last_100 = -1, hud_last_50 = -1, hud_last_miss = -1;
+    int  hud_last_fps = -1;
+    bool hud_dirty = true;
 
     while (running) {
         SDL_Event e;
@@ -218,6 +271,7 @@ int main(int argc, char* argv[]) {
                     active_fingers.push_back({ e.tfinger.fingerID, col });
                 finger_done:
                     column_pressed[col] = true;
+                    play_sound(hit_stream, hit_data, hit_len);
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -410,6 +464,61 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ---- HUD (cached to texture) ----
+        if (hud_tex) {
+            // FPS only updates once per second (when the log report fires).
+            // Everything else triggers a rebuild only on actual value change.
+            bool changed =
+                combo    != hud_last_combo || max_combo != hud_last_max ||
+                cnt_300  != hud_last_300   || cnt_100   != hud_last_100 ||
+                cnt_50   != hud_last_50    || cnt_miss  != hud_last_miss ||
+                hud_fps  != hud_last_fps;
+
+            if (changed) {
+                hud_last_combo = combo;   hud_last_max  = max_combo;
+                hud_last_300   = cnt_300; hud_last_100  = cnt_100;
+                hud_last_50    = cnt_50;  hud_last_miss = cnt_miss;
+                hud_last_fps   = hud_fps;
+
+                SDL_SetRenderTarget(renderer, hud_tex);
+                SDL_SetRenderScale(renderer, HUD_SCALE, HUD_SCALE);
+
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+                SDL_RenderClear(renderer);
+
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+
+                char buf[128];
+                int x = 6, y = 6, lh = 14;
+
+                SDL_snprintf(buf, sizeof(buf), "Combo: %d", combo);
+                SDL_RenderDebugText(renderer, (float)x, (float)y, buf); y += lh;
+
+                SDL_snprintf(buf, sizeof(buf), "Max: %d", max_combo);
+                SDL_RenderDebugText(renderer, (float)x, (float)y, buf); y += lh;
+
+                SDL_snprintf(buf, sizeof(buf), "300:%d 100:%d 50:%d Miss:%d",
+                             cnt_300, cnt_100, cnt_50, cnt_miss);
+                SDL_RenderDebugText(renderer, (float)x, (float)y, buf); y += lh;
+
+                int total = cnt_300 + cnt_100 + cnt_50;
+                double acc = 0.0;
+                if (total + cnt_miss > 0)
+                    acc = (cnt_300*300.0 + cnt_100*100.0 + cnt_50*50.0)
+                        / ((total + cnt_miss) * 300.0) * 100.0;
+                SDL_snprintf(buf, sizeof(buf), "Acc: %.2f%%  FPS: %d", acc, hud_fps);
+                SDL_RenderDebugText(renderer, (float)x, (float)y, buf);
+
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                SDL_SetRenderTarget(renderer, NULL);
+            }
+
+            // Blit — 60px inset from top-left for rounded corners
+            SDL_FRect dst = { 60.0f, 60.0f,
+                              (float)HUD_TEX_W, (float)HUD_TEX_H };
+            SDL_RenderTexture(renderer, hud_tex, NULL, &dst);
+        }
+
         SDL_RenderPresent(renderer);
 
         frames++;
@@ -417,6 +526,7 @@ int main(int argc, char* argv[]) {
         if (now - last_report >= 1000) {
             report_count++;
             SDL_Log("FPS[%d]: %d  combo=%d max=%d 300=%d 100=%d 50=%d miss=%d", report_count, frames, combo, max_combo, cnt_300, cnt_100, cnt_50, cnt_miss);
+            hud_fps = frames;      // update HUD's FPS display once per second
             frames = 0;
             last_report = now;
 
@@ -430,6 +540,7 @@ int main(int argc, char* argv[]) {
     if (hit_data)     SDL_free(hit_data);
     if (miss_stream)  SDL_DestroyAudioStream(miss_stream);
     if (miss_data)    SDL_free(miss_data);
+    if (hud_tex) SDL_DestroyTexture(hud_tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
