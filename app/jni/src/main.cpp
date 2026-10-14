@@ -7,9 +7,9 @@
 int main(int argc, char* argv[]) {
     SDL_Log("OSUVINNIV_MAIN_ENTERED argc=%d", argc);
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
-    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
+    // SDL_HINT_TOUCH_MOUSE_EVENTS disabled: we handle FINGER_DOWN/UP directly for multi-touch
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
     }
@@ -55,6 +55,28 @@ int main(int argc, char* argv[]) {
     }
 
 
+    // Audio
+    SDL_AudioSpec wav_spec = {};
+    Uint8*  wav_data = nullptr;
+    Uint32  wav_len  = 0;
+    SDL_AudioStream* audio_stream = nullptr;
+    const char* audio_path = "/sdcard/Android/data/sh.ppy.osuvinniv/files/audio.wav";
+    if (SDL_LoadWAV(audio_path, &wav_spec, &wav_data, &wav_len)) {
+        SDL_Log("AUDIO: loaded %d Hz, %d ch, %u bytes",
+                wav_spec.freq, wav_spec.channels, wav_len);
+        audio_stream = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &wav_spec, nullptr, nullptr);
+        if (!audio_stream)
+            SDL_Log("AUDIO: stream open failed: %s", SDL_GetError());
+    } else {
+        SDL_Log("AUDIO: load failed: %s", SDL_GetError());
+    }
+
+    const Uint64 audio_start_tick = SDL_GetTicks() + 2000;  // 2s lead-in
+    bool audio_queued = false;
+
+    SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
+
     // Playfield geometry (needed by both event loop and draw block)
     const int   keys        = (map.key_count > 0) ? map.key_count : 4;
     const float max_col_w   = 240.0f;
@@ -65,11 +87,6 @@ int main(int argc, char* argv[]) {
     const float scroll_pps  = 1.5f;
     const float judgement_y = win_h * 0.85f;
 
-    Uint64 last_report = SDL_GetTicks();
-    int frames = 0;
-    int report_count = 0;
-    bool running = true;
-
     // Judgment state
     std::vector<bool>   note_judged(map.notes.size(), false);
     std::vector<double> note_hit_time(map.notes.size(), -1.0);
@@ -77,6 +94,47 @@ int main(int argc, char* argv[]) {
     int   combo = 0, max_combo = 0;
     int   cnt_300 = 0, cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
+
+    // Multi-touch tracking
+    struct FingerSlot { SDL_FingerID id; int col; };
+    std::vector<FingerSlot> active_fingers;
+    active_fingers.reserve(10);
+
+    auto find_col = [&](float x) -> int {
+        int c = (int)((x - playfield_x) / col_w);
+        return (c >= 0 && c < keys && c < 16) ? c : -1;
+    };
+
+    auto judge_col = [&](int col, double t) -> bool {
+        double map_t = t - (double)audio_start_tick;
+        double best = 1e9; int best_i = -1;
+        for (size_t i = 0; i < map.notes.size(); i++) {
+            if (note_judged[i]) continue;
+            if (map.notes[i].column != col) continue;
+            double d = map.notes[i].time - map_t;
+            if (d < -80.0) continue;
+            if (d < best) { best = d; best_i = (int)i; }
+            if (d > 80.0) break;
+        }
+        if (best_i < 0) return false;
+        double a = best < 0 ? -best : best;
+        if (a > 70.0) return false;
+        note_judged[best_i] = true;
+        if      (a <= 22.0) cnt_300++;
+        else if (a <= 45.0) cnt_100++;
+        else                cnt_50++;
+        combo++;
+        if (combo > max_combo) max_combo = combo;
+        return true;
+    };
+
+    Uint64 last_report = SDL_GetTicks();
+    int frames = 0;
+    int report_count = 0;
+    bool running = true;
+
+
+
 
     while (running) {
         SDL_Event e;
@@ -121,36 +179,39 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                double t = (double)SDL_GetTicks();
-                int col = (int)((e.button.x - playfield_x) / col_w);
-                if (col >= 0 && col < keys && col < 16) {
-                    column_pressed[col] = true;
-                    double best = 1e9; int best_i = -1;
-                    for (size_t i = 0; i < map.notes.size(); i++) {
-                        if (note_judged[i]) continue;
-                        if (map.notes[i].column != col) continue;
-                        double d = map.notes[i].time - t;
-                        if (d < -80.0) continue;
-                        if (d < best) { best = d; best_i = (int)i; }
-                        if (d > 80.0) break;
+            if (e.type == SDL_EVENT_FINGER_DOWN) {
+                float tx = e.tfinger.x * (float)win_w;
+                int col = find_col(tx);
+                if (col >= 0) {
+                    // Replace existing entry for this finger
+                    for (auto& f : active_fingers) {
+                        if (f.id == e.tfinger.fingerID) { f.col = col; goto finger_done; }
                     }
-                    if (best_i >= 0) {
-                        double a = best < 0 ? -best : best;
-                        if (a <= 70.0) {
-                            note_judged[best_i] = true;
-                            if      (a <= 22.0) cnt_300++;
-                            else if (a <= 45.0) cnt_100++;
-                            else                cnt_50++;
-                            combo++;
-                            if (combo > max_combo) max_combo = combo;
-                        }
+                    active_fingers.push_back({ e.tfinger.fingerID, col });
+                finger_done:
+                    column_pressed[col] = true;
+                    judge_col(col, (double)SDL_GetTicks());
+                }
+            }
+            if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) {
+                for (size_t i = 0; i < active_fingers.size(); i++) {
+                    if (active_fingers[i].id == e.tfinger.fingerID) {
+                        column_pressed[active_fingers[i].col] = false;
+                        active_fingers.erase(active_fingers.begin() + i);
+                        break;
                     }
                 }
             }
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                int col = find_col(e.button.x);
+                if (col >= 0) {
+                    column_pressed[col] = true;
+                    judge_col(col, (double)SDL_GetTicks());
+                }
+            }
             if (e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                int col = (int)((e.button.x - playfield_x) / col_w);
-                if (col >= 0 && col < keys && col < 16) column_pressed[col] = false;
+                int col = find_col(e.button.x);
+                if (col >= 0) column_pressed[col] = false;
             }
             if (e.type == SDL_EVENT_KEY_UP) {
                 if      (e.key.key == SDLK_D) column_pressed[0] = false;
@@ -161,7 +222,17 @@ int main(int argc, char* argv[]) {
         }
 
         SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
-        const double now_ms = (double)SDL_GetTicks();
+
+        const Uint64 current_tick = SDL_GetTicks();
+        if (!audio_queued && audio_stream && current_tick >= audio_start_tick) {
+            if (SDL_PutAudioStreamData(audio_stream, wav_data, wav_len)) {
+                SDL_ResumeAudioStreamDevice(audio_stream);
+                audio_queued = true;
+                SDL_Log("AUDIO: playback started");
+            }
+        }
+        // Signed: negative during lead-in, positive during play
+        const double now_ms = (double)current_tick - (double)audio_start_tick;
 
         // Background
         while (miss_cursor < map.notes.size() &&
@@ -236,6 +307,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (audio_stream) SDL_DestroyAudioStream(audio_stream);
+    if (wav_data)     SDL_free(wav_data);
+    SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 0;
