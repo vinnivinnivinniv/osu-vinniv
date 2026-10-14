@@ -15,6 +15,31 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // ---- settings.ini ----
+    float cfg_music_vol    = 0.6f;
+    float cfg_hitsound_vol = 1.0f;
+    float cfg_scroll_speed = 1.5f;
+    int   cfg_fps_cap      = 120;   // 0 = uncapped
+    {
+        std::ifstream sf("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini");
+        std::string line;
+        while (std::getline(sf, line)) {
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq);
+            std::string v = line.substr(eq + 1);
+            try {
+                if      (k == "music_volume")    cfg_music_vol    = std::stof(v);
+                else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
+                else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
+                else if (k == "fps_cap")         cfg_fps_cap      = std::stoi(v);
+            } catch (...) {}
+        }
+        SDL_Log("CFG: music=%.2f hit=%.2f scroll=%.2f",
+                cfg_music_vol, cfg_hitsound_vol, cfg_scroll_speed);
+    }
+
+
     SDL_Window* window = SDL_CreateWindow(
         "osu!vinniv",
         0, 0,
@@ -29,7 +54,10 @@ int main(int argc, char* argv[]) {
         SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
         return 1;
     }
-    SDL_SetRenderVSync(renderer, 0);
+    // If fps_cap is 120 (matching panel rate), use vsync for accuracy.
+    // Otherwise disable vsync and rely on the software cap below.
+    if (cfg_fps_cap == 120) SDL_SetRenderVSync(renderer, 1);
+    else                    SDL_SetRenderVSync(renderer, 0);
 
     int win_w = 0, win_h = 0;
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
@@ -55,28 +83,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-
-    // ---- settings.ini ----
-    float cfg_music_vol    = 0.6f;
-    float cfg_hitsound_vol = 1.0f;
-    float cfg_scroll_speed = 1.5f;
-    {
-        std::ifstream sf("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini");
-        std::string line;
-        while (std::getline(sf, line)) {
-            auto eq = line.find('=');
-            if (eq == std::string::npos) continue;
-            std::string k = line.substr(0, eq);
-            std::string v = line.substr(eq + 1);
-            try {
-                if      (k == "music_volume")    cfg_music_vol    = std::stof(v);
-                else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
-                else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
-            } catch (...) {}
-        }
-        SDL_Log("CFG: music=%.2f hit=%.2f scroll=%.2f",
-                cfg_music_vol, cfg_hitsound_vol, cfg_scroll_speed);
-    }
 
     // Audio
     SDL_AudioSpec wav_spec = {};
@@ -237,6 +243,7 @@ int main(int argc, char* argv[]) {
     bool hud_dirty = true;
 
     while (running) {
+        Uint64 frame_start = SDL_GetTicksNS() / 1000ULL;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT ||
@@ -517,6 +524,25 @@ int main(int argc, char* argv[]) {
             SDL_FRect dst = { 60.0f, 60.0f,
                               (float)HUD_TEX_W, (float)HUD_TEX_H };
             SDL_RenderTexture(renderer, hud_tex, NULL, &dst);
+        }
+
+        // Frame cap: target cfg_fps, sleep the remainder of the frame.
+        // Set to 0 in settings.ini to disable (uncapped).
+        // Software cap only when vsync is off. With vsync on,
+        // SDL_RenderPresent blocks until vblank; adding our own delay
+        // would occasionally miss the next vblank and halve the rate.
+        if (cfg_fps_cap > 0 && cfg_fps_cap != 120) {
+            Uint64 frame_end_target = frame_start + (1000000ULL / cfg_fps_cap);
+            Uint64 now_us = SDL_GetTicksNS() / 1000ULL;
+            if (now_us < frame_end_target) {
+                Uint64 remaining_us = frame_end_target - now_us;
+                if (remaining_us > 1500) {
+                    SDL_DelayNS((remaining_us - 1500) * 1000ULL);
+                }
+                while (SDL_GetTicksNS() / 1000ULL < frame_end_target) {
+                    // tight loop
+                }
+            }
         }
 
         SDL_RenderPresent(renderer);
