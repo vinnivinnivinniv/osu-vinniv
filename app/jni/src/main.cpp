@@ -94,6 +94,8 @@ int main(int argc, char* argv[]) {
     int   combo = 0, max_combo = 0;
     int   cnt_300 = 0, cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
+    std::vector<bool>   hold_active(map.notes.size(), false);
+    std::vector<size_t> active_holds;
 
     // Multi-touch tracking
     struct FingerSlot { SDL_FingerID id; int col; };
@@ -120,6 +122,10 @@ int main(int argc, char* argv[]) {
         double a = best < 0 ? -best : best;
         if (a > 70.0) return false;
         note_judged[best_i] = true;
+        if (map.notes[best_i].is_hold) {
+            hold_active[best_i] = true;
+            active_holds.push_back(best_i);
+        }
         if      (a <= 22.0) cnt_300++;
         else if (a <= 45.0) cnt_100++;
         else                cnt_50++;
@@ -156,27 +162,7 @@ int main(int argc, char* argv[]) {
                 else if (e.key.key == SDLK_K) col = 3;
                 if (col >= 0 && col < keys) {
                     column_pressed[col] = true;
-                    double best = 1e9; int best_i = -1;
-                    for (size_t i = 0; i < map.notes.size(); i++) {
-                        if (note_judged[i]) continue;
-                        if (map.notes[i].column != col) continue;
-                        double d = map.notes[i].time - (double)SDL_GetTicks();
-                        if (d < -80.0) continue;
-                        if (d < best) { best = d; best_i = (int)i; }
-                        if (d > 80.0) break;
-                    }
-                    if (best_i >= 0) {
-                        double a = best < 0 ? -best : best;
-                        if (a <= 70.0) {
-                            note_judged[best_i] = true;
-                            note_hit_time[best_i] = (double)SDL_GetTicks();
-                            if      (a <= 22.0) cnt_300++;
-                            else if (a <= 45.0) cnt_100++;
-                            else                cnt_50++;
-                            combo++;
-                            if (combo > max_combo) max_combo = combo;
-                        }
-                    }
+                    judge_col(col, (double)SDL_GetTicks());
                 }
             }
             if (e.type == SDL_EVENT_FINGER_DOWN) {
@@ -194,11 +180,27 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) {
+                int release_col = -1;
                 for (size_t i = 0; i < active_fingers.size(); i++) {
                     if (active_fingers[i].id == e.tfinger.fingerID) {
-                        column_pressed[active_fingers[i].col] = false;
+                        release_col = active_fingers[i].col;
+                        column_pressed[release_col] = false;
                         active_fingers.erase(active_fingers.begin() + i);
                         break;
+                    }
+                }
+                if (release_col >= 0) {
+                    double now_map = (double)SDL_GetTicks() - (double)audio_start_tick;
+                    for (size_t i = 0; i < active_holds.size(); ) {
+                        size_t hi = active_holds[i];
+                        if (map.notes[hi].column != release_col) { i++; continue; }
+                        if (now_map < map.notes[hi].end_time - 150.0) {
+                            // Broken early
+                            hold_active[hi] = false;
+                            cnt_miss++;
+                            combo = 0;
+                        }
+                        active_holds.erase(active_holds.begin() + i);
                     }
                 }
             }
@@ -235,6 +237,18 @@ int main(int argc, char* argv[]) {
         const double now_ms = (double)current_tick - (double)audio_start_tick;
 
         // Background
+        // Complete any holds whose tail has passed
+        {
+            double nmap = (double)SDL_GetTicks() - (double)audio_start_tick;
+            for (size_t i = 0; i < active_holds.size(); ) {
+                size_t hi = active_holds[i];
+                if (nmap > map.notes[hi].end_time) {
+                    hold_active[hi] = false;
+                    active_holds.erase(active_holds.begin() + i);
+                } else i++;
+            }
+        }
+
         while (miss_cursor < map.notes.size() &&
                map.notes[miss_cursor].time < now_ms - 70.0) {
             if (!note_judged[miss_cursor]) {
