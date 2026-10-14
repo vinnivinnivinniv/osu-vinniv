@@ -2,6 +2,7 @@
 #include <SDL3/SDL_main.h>
 #include <GLES3/gl3.h>
 #include <cmath>
+#include "parser.h"
 
 int main(int argc, char* argv[]) {
     SDL_Log("OSUVINNIV_MAIN_ENTERED argc=%d", argc);
@@ -40,6 +41,27 @@ int main(int argc, char* argv[]) {
     int win_w = 0, win_h = 0;
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
     SDL_Log("Window size: %dx%d", win_w, win_h);
+
+    {
+        Beatmap map;
+        const char* map_path = "/sdcard/Android/data/sh.ppy.osuvinniv/files/map.osu";
+        if (parse_osu_file(map_path, map)) {
+            SDL_Log("MAP: %s - %s [%s]", map.artist.c_str(), map.title.c_str(), map.version.c_str());
+            SDL_Log("  keys=%d  notes=%zu", map.key_count, map.notes.size());
+            int holds = 0;
+            for (const auto& n : map.notes) if (n.is_hold) holds++;
+            SDL_Log("  taps=%zu  holds=%d", map.notes.size() - holds, holds);
+            if (!map.notes.empty()) {
+                SDL_Log("  first=%.0f ms  last=%.0f ms", map.notes.front().time, map.notes.back().time);
+                SDL_Log("  first note: col=%d  t=%.0f  hold=%d  end=%.0f",
+                    map.notes.front().column, map.notes.front().time,
+                    map.notes.front().is_hold ? 1 : 0, map.notes.front().end_time);
+            }
+        } else {
+            SDL_Log("MAP: parse failed for %s", map_path);
+        }
+    }
+
 
     Uint64 last_report = SDL_GetTicks();
     int frames = 0;

@@ -4,7 +4,10 @@ project(osu_vinniv CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_library(main SHARED main.cpp)
+add_library(main SHARED
+    main.cpp
+    parser.cpp
+)
 
 find_library(GLESv3 GLESv3 REQUIRED)
 find_library(log log REQUIRED)
