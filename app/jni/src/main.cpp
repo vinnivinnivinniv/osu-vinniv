@@ -104,6 +104,22 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // ---- per-K key bindings (SDL keycodes per key count) ----
+    // Defaults match modern osu!mania; overridden by settings.ini keys_Nk=...
+    std::vector<SDL_Keycode> bindings[16];
+    {
+        bindings[1]  = { SDLK_SPACE };
+        bindings[2]  = { SDLK_F, SDLK_J };
+        bindings[3]  = { SDLK_F, SDLK_SPACE, SDLK_J };
+        bindings[4]  = { SDLK_D, SDLK_F, SDLK_J, SDLK_K };
+        bindings[5]  = { SDLK_D, SDLK_F, SDLK_SPACE, SDLK_J, SDLK_K };
+        bindings[6]  = { SDLK_S, SDLK_D, SDLK_F, SDLK_J, SDLK_K, SDLK_L };
+        bindings[7]  = { SDLK_S, SDLK_D, SDLK_F, SDLK_SPACE, SDLK_J, SDLK_K, SDLK_L };
+        bindings[8]  = { SDLK_A, SDLK_S, SDLK_D, SDLK_F, SDLK_J, SDLK_K, SDLK_L, SDLK_SEMICOLON };
+        bindings[9]  = { SDLK_A, SDLK_S, SDLK_D, SDLK_F, SDLK_SPACE, SDLK_J, SDLK_K, SDLK_L, SDLK_SEMICOLON };
+        bindings[10] = { SDLK_A, SDLK_S, SDLK_D, SDLK_F, SDLK_V, SDLK_N, SDLK_J, SDLK_K, SDLK_L, SDLK_SEMICOLON };
+    }
+
     // ---- settings.ini ----
     float cfg_music_vol    = 0.6f;
     float cfg_hitsound_vol = 1.0f;
@@ -120,7 +136,28 @@ int main(int argc, char* argv[]) {
             std::string k = line.substr(0, eq);
             std::string v = line.substr(eq + 1);
             try {
-                if      (k == "music_volume")    cfg_music_vol    = std::stof(v);
+                if (k.rfind("keys_", 0) == 0) {
+                    int nk = 0;
+                    try { nk = std::stoi(k.substr(5)); } catch (...) { nk = 0; }
+                    if (nk >= 1 && nk <= 10) {
+                        std::vector<SDL_Keycode> parsed;
+                        size_t pos = 0;
+                        while (pos <= v.size()) {
+                            size_t comma = v.find(',', pos);
+                            std::string tok = (comma == std::string::npos)
+                                ? v.substr(pos)
+                                : v.substr(pos, comma - pos);
+                            if (!tok.empty()) {
+                                SDL_Keycode kc = SDL_GetKeyFromName(tok.c_str());
+                                if (kc != SDLK_UNKNOWN) parsed.push_back(kc);
+                            }
+                            if (comma == std::string::npos) break;
+                            pos = comma + 1;
+                        }
+                        if (parsed.size() == (size_t)nk) bindings[nk] = parsed;
+                    }
+                }
+                else if (k == "music_volume")    cfg_music_vol    = std::stof(v);
                 else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
                 else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
                 else if (k == "fps_cap")         cfg_fps_cap      = std::stoi(v);
@@ -746,10 +783,12 @@ int main(int argc, char* argv[]) {
 
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !paused && !resuming && !result_shown && app_state == AppState::Playing) {
                 int col = -1;
-                if      (e.key.key == SDLK_D) col = 0;
-                else if (e.key.key == SDLK_F) col = 1;
-                else if (e.key.key == SDLK_J) col = 2;
-                else if (e.key.key == SDLK_K) col = 3;
+                if (keys >= 1 && keys < 16) {
+                    const auto& b = bindings[keys];
+                    for (size_t i = 0; i < b.size(); i++) {
+                        if (b[i] == e.key.key) { col = (int)i; break; }
+                    }
+                }
                 if (col >= 0 && col < keys) {
                     column_pressed[col] = true;
                     play_note_normal_hitsound();
@@ -995,6 +1034,16 @@ int main(int argc, char* argv[]) {
                             fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
                             fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
                             fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
+                            fprintf(f, "audio_offset_ms=%.3f\n", cfg_audio_offset_ms);
+                            for (int nk = 1; nk <= 10; nk++) {
+                                fprintf(f, "keys_%dk=", nk);
+                                for (size_t i = 0; i < bindings[nk].size(); i++) {
+                                    if (i) fprintf(f, ",");
+                                    const char* nm = SDL_GetKeyName(bindings[nk][i]);
+                                    fprintf(f, "%s", nm ? nm : "?");
+                                }
+                                fprintf(f, "\n");
+                            }
                             fclose(f);
                             SDL_Log("SETTINGS: saved");
                         }
@@ -1169,10 +1218,12 @@ int main(int argc, char* argv[]) {
                 if (col >= 0) column_pressed[col] = false;
             }
             if (e.type == SDL_EVENT_KEY_UP) {
-                if      (e.key.key == SDLK_D) column_pressed[0] = false;
-                else if (e.key.key == SDLK_F) column_pressed[1] = false;
-                else if (e.key.key == SDLK_J) column_pressed[2] = false;
-                else if (e.key.key == SDLK_K) column_pressed[3] = false;
+                for (int nk = 1; nk < 16; nk++) {
+                    const auto& b = bindings[nk];
+                    for (size_t i = 0; i < b.size() && i < 16; i++) {
+                        if (b[i] == e.key.key) column_pressed[i] = false;
+                    }
+                }
             }
         }
 
