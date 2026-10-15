@@ -56,6 +56,12 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
             else if (k == "Mode") {
                 try { out.mode = std::stoi(v); } catch (...) {}
             }
+            else if (k == "SampleSet") {
+                // "Normal" / "Soft" / "Drum"
+                if      (v == "Normal" || v == "normal") out.sample_set = 1;
+                else if (v == "Soft"   || v == "soft")   out.sample_set = 2;
+                else if (v == "Drum"   || v == "drum")   out.sample_set = 3;
+            }
         }
         else if (section == "Metadata") {
             auto pos = t.find(':');
@@ -93,6 +99,20 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
                 try { out.od = std::stod(v); } catch (...) {}
             }
         }
+        else if (section == "Events") {
+            // Background line format: 0,0,"filename.jpg",x,y
+            // We take the first one we see.
+            if (out.bg_file.empty()) {
+                // Find quoted filename
+                auto q1 = t.find('"');
+                if (q1 != std::string::npos) {
+                    auto q2 = t.find('"', q1 + 1);
+                    if (q2 != std::string::npos && q2 > q1 + 1) {
+                        out.bg_file = t.substr(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+            }
+        }
         else if (section == "HitObjects") {
             std::vector<std::string> parts;
             std::stringstream ss(t);
@@ -112,6 +132,41 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
                     n.hit_sound = std::stoi(parts[4]);
                 else
                     n.hit_sound = 0;
+
+                // Field 6 (or after endTime: for holds) is:
+                //   bank:addition:suffix:volume:filename
+                // All fields optional. Parse it if present.
+                std::string hs_field;
+                if (parts.size() >= 6) {
+                    const std::string& tail = parts[5];
+                    if (n.is_hold) {
+                        // tail is "endTime:bank:addition:suffix:volume:filename"
+                        auto c1 = tail.find(':');
+                        if (c1 != std::string::npos)
+                            hs_field = tail.substr(c1 + 1);
+                    } else {
+                        // tail IS the hitSample
+                        hs_field = tail;
+                    }
+                }
+
+                if (!hs_field.empty()) {
+                    std::vector<std::string> hparts;
+                    std::stringstream hss(hs_field);
+                    std::string hp;
+                    while (std::getline(hss, hp, ':')) hparts.push_back(hp);
+
+                    if (hparts.size() >= 1 && !hparts[0].empty()) {
+                        try { n.sample_bank = std::stoi(hparts[0]); }
+                        catch (...) { n.sample_bank = 0; }
+                    }
+                    if (hparts.size() >= 3) n.sample_suffix = hparts[2];
+                    if (hparts.size() >= 4 && !hparts[3].empty()) {
+                        try { n.sample_volume = std::stoi(hparts[3]); }
+                        catch (...) { n.sample_volume = 0; }
+                    }
+                    if (hparts.size() >= 5) n.sample_filename = hparts[4];
+                }
             } catch (...) { continue; }
 
             if (n.is_hold && parts.size() >= 6) {

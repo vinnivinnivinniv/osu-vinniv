@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(MINIZ_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/miniz)
 set(DRLIBS_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/dr_libs)
+set(STB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/stb)
 
 add_library(main SHARED
     main.cpp
@@ -13,15 +14,16 @@ add_library(main SHARED
     song_select.cpp
     song_cache.cpp
     image_load.cpp
+    map_sample_bank.cpp
     osz_import.cpp
     audio_load.cpp
     ${MINIZ_DIR}/miniz.c
     ${MINIZ_DIR}/miniz_tdef.c
     ${MINIZ_DIR}/miniz_tinfl.c
     ${MINIZ_DIR}/miniz_zip.c
+    ${STB_DIR}/stb_vorbis.c
 )
 
-set(STB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/stb)
 
 target_include_directories(main PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

@@ -10,6 +10,7 @@ struct SongEntry {
     std::string artist;
     std::string version;     // difficulty name
     std::string audio_path;  // absolute path to audio file (or "" if missing)
+    std::string bg_path;     // absolute path to bg image (or "" if missing)
     int         key_count;
     double      od;
 };

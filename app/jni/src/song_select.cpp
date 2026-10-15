@@ -61,9 +61,9 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
             std::string base = (dot != std::string::npos)
                              ? m.audio_file.substr(0, dot)
                              : m.audio_file;
+            candidates.push_back(join(folder, base + ".ogg"));
             candidates.push_back(join(folder, base + ".mp3"));
             candidates.push_back(join(folder, base + ".wav"));
-            candidates.push_back(join(folder, base + ".ogg"));
         }
         // Last-resort defaults
         candidates.push_back(join(folder, "audio.mp3"));
@@ -77,9 +77,40 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
                 break;
             }
         }
+        // Background resolution — use the filename declared in [Events],
+        // falling back to well-known names.
+        {
+            std::vector<std::string> bg_candidates;
+            if (!m.bg_file.empty()) bg_candidates.push_back(join(folder, m.bg_file));
+            bg_candidates.push_back(join(folder, "bg.jpg"));
+            bg_candidates.push_back(join(folder, "BG.jpg"));
+            bg_candidates.push_back(join(folder, "bg.png"));
+            bg_candidates.push_back(join(folder, "BG.png"));
+            struct stat bst;
+            for (const auto& c : bg_candidates) {
+                if (stat(c.c_str(), &bst) == 0) { e.bg_path = c; break; }
+            }
+        }
+
         if (e.audio_path.empty()) {
             SDL_Log("SONGS: no audio found in %s (declared '%s')",
                     folder.c_str(), m.audio_file.c_str());
+            // List what audio-ish files are actually in the folder
+            DIR* ad = opendir(folder.c_str());
+            if (ad) {
+                struct dirent* ade;
+                while ((ade = readdir(ad)) != nullptr) {
+                    std::string n = ade->d_name;
+                    if (ends_with(n, ".mp3") || ends_with(n, ".wav") ||
+                        ends_with(n, ".ogg") || ends_with(n, ".MP3") ||
+                        ends_with(n, ".WAV") || ends_with(n, ".OGG")) {
+                        SDL_Log("SONGS:   actual audio file: %s", n.c_str());
+                    }
+                }
+                closedir(ad);
+            }
+        } else {
+            SDL_Log("SONGS: audio resolution -> %s", e.audio_path.c_str());
         }
     }
     return true;

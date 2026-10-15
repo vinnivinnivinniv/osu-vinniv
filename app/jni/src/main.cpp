@@ -10,6 +10,34 @@
 #include "osz_import.h"
 #include "audio_load.h"
 #include "image_load.h"
+#include "map_sample_bank.h"
+#include "bundled_sounds.h"
+#include <sys/stat.h>
+
+// Write bundled default sounds to the files dir on first launch.
+// Files already present are left alone so a user can override them.
+static void ensure_bundled_sounds(const char* base_dir) {
+    struct Bundled { const char* name; const unsigned char* data; unsigned int len; };
+    Bundled items[] = {
+        { "hit",       bundled_hit_ogg,       bundled_hit_ogg_len },
+        { "clap",      bundled_clap_ogg,      bundled_clap_ogg_len },
+        { "whistle",   bundled_whistle_ogg,   bundled_whistle_ogg_len },
+        { "finish",    bundled_finish_ogg,    bundled_finish_ogg_len },
+        { "miss",      bundled_miss_ogg,      bundled_miss_ogg_len },
+        { "countdown", bundled_countdown_ogg, bundled_countdown_ogg_len },
+    };
+    for (auto& it : items) {
+        char path[256];
+        SDL_snprintf(path, sizeof(path), "%s/%s.ogg", base_dir, it.name);
+        struct stat st;
+        if (stat(path, &st) == 0 && st.st_size > 0) continue;
+        FILE* f = fopen(path, "wb");
+        if (!f) continue;
+        fwrite(it.data, 1, it.len, f);
+        fclose(f);
+        SDL_Log("SOUNDS: wrote bundled %s", path);
+    }
+}
 
 enum class AppState { SongSelect, Playing, Result, Settings };
 
@@ -32,6 +60,9 @@ static double osu_speed_to_scroll_pps(double speed, double visible_height_px) {
 
 int main(int argc, char* argv[]) {
     SDL_Log("OSUVINNIV_MAIN_ENTERED argc=%d", argc);
+
+    // Write bundled default sounds to the files dir on first launch
+    ensure_bundled_sounds("/sdcard/Android/data/sh.ppy.osuvinniv/files");
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     // SDL_HINT_TOUCH_MOUSE_EVENTS disabled: we handle FINGER_DOWN/UP directly for multi-touch
 
@@ -98,6 +129,21 @@ int main(int argc, char* argv[]) {
         if (parse_osu_file(map_path, map)) {
             SDL_Log("MAP: %s - %s [%s]", map.artist.c_str(), map.title.c_str(), map.version.c_str());
             SDL_Log("  keys=%d  bpm=%.1f  notes=%zu", map.key_count, map.bpm, map.notes.size());
+            // SAMPLE DUMP
+            {
+                int banks[4] = {0,0,0,0};
+                int suffixes = 0, files = 0, vols = 0;
+                for (const auto& n : map.notes) {
+                    if (n.sample_bank >= 0 && n.sample_bank < 4) banks[n.sample_bank]++;
+                    if (!n.sample_suffix.empty()) suffixes++;
+                    if (!n.sample_filename.empty()) files++;
+                    if (n.sample_volume > 0) vols++;
+                }
+                SDL_Log("  SampleSet=%d samples: b0=%d b1=%d b2=%d b3=%d sfx=%d fls=%d vol=%d",
+                        map.sample_set,
+                        banks[0], banks[1], banks[2], banks[3],
+                        suffixes, files, vols);
+            }
             int holds = 0;
             for (const auto& n : map.notes) if (n.is_hold) holds++;
             SDL_Log("  taps=%zu  holds=%d", map.notes.size() - holds, holds);
@@ -135,7 +181,7 @@ int main(int argc, char* argv[]) {
     Uint8*  hit_data = nullptr;
     Uint32  hit_len  = 0;
     SDL_AudioStream* hit_stream = nullptr;
-    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/hit.wav",
+    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/hit.ogg",
                     &hit_spec, &hit_data, &hit_len)) {
         SDL_Log("HIT: loaded %d Hz, %d ch, %u bytes",
                 hit_spec.freq, hit_spec.channels, hit_len);
@@ -154,7 +200,7 @@ int main(int argc, char* argv[]) {
     Uint8*  miss_data = nullptr;
     Uint32  miss_len  = 0;
     SDL_AudioStream* miss_stream = nullptr;
-    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/miss.wav",
+    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/miss.ogg",
                     &miss_spec, &miss_data, &miss_len)) {
         SDL_Log("MISS: loaded %d Hz, %u bytes", miss_spec.freq, miss_len);
         miss_stream = SDL_OpenAudioDeviceStream(
@@ -186,7 +232,7 @@ int main(int argc, char* argv[]) {
         for (auto& e : extras) {
             char path[128];
             SDL_snprintf(path, sizeof(path),
-                "/sdcard/Android/data/sh.ppy.osuvinniv/files/%s.wav", e.name);
+                "/sdcard/Android/data/sh.ppy.osuvinniv/files/%s.ogg", e.name);
             SDL_AudioSpec spec = {};
             if (load_audio_to_pcm(path, &spec, e.d, e.l)) {
                 *e.s = SDL_OpenAudioDeviceStream(
@@ -204,7 +250,7 @@ int main(int argc, char* argv[]) {
     Uint8*  cd_data = nullptr;
     Uint32  cd_len  = 0;
     SDL_AudioStream* countdown_sfx_stream = nullptr;
-    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/countdown.wav",
+    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/countdown.ogg",
                     &cd_spec, &cd_data, &cd_len)) {
         countdown_sfx_stream = SDL_OpenAudioDeviceStream(
             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &cd_spec, nullptr, nullptr);
@@ -265,6 +311,17 @@ int main(int argc, char* argv[]) {
     std::vector<FingerSlot> active_fingers;
     active_fingers.reserve(10);
 
+    Uint64 last_miss_sound_tick = 0;   // miss-sound cooldown
+
+    auto play_miss_sound = [&]() {
+        Uint64 now = SDL_GetTicks();
+        // Cooldown so a burst of misses doesn't spam the blip.
+        if (now - last_miss_sound_tick < 150) return;
+        last_miss_sound_tick = now;
+        if (miss_stream && miss_data)
+            SDL_PutAudioStreamData(miss_stream, miss_data, (int)miss_len);
+    };
+
     auto play_sound = [](SDL_AudioStream* s, Uint8* data, Uint32 len) {
         if (!s || !data) return;
         // Kill any queued samples so the newest press wins instead of
@@ -276,6 +333,41 @@ int main(int argc, char* argv[]) {
     auto find_col = [&](float x) -> int {
         int c = (int)((x - playfield_x) / col_w);
         return (c >= 0 && c < keys && c < 16) ? c : -1;
+    };
+
+
+    // Per-map hitsound resolution.
+    // The map's SampleSet (or a per-note override) picks the bank:
+    //   1 = normal, 2 = soft, 3 = drum. Default = soft.
+    // Format: <bank>-<addition><suffix>.wav, e.g. soft-hitclap.wav
+    // Per-map hitsound bank (loaded when a song starts)
+    MapSampleBank map_bank;
+
+    auto play_note_normal_hitsound = [&]() {
+        int bank = (map.sample_set > 0 ? map.sample_set : 2);
+        const char* bank_name = "soft";
+        if      (bank == 1) bank_name = "normal";
+        else if (bank == 3) bank_name = "drum";
+        char buf[64];
+        SDL_snprintf(buf, sizeof(buf), "%s-hitnormal.wav", bank_name);
+        if (!map_bank.play(buf, cfg_hitsound_vol, true))
+            play_sound(hit_stream, hit_data, hit_len);
+    };
+
+    auto play_note_sample = [&](int bank, const char* addition,
+                                 const std::string& suffix, int volume) -> bool {
+        if (bank == 0) bank = (map.sample_set > 0 ? map.sample_set : 2);
+        const char* bank_name = "soft";
+        if      (bank == 1) bank_name = "normal";
+        else if (bank == 3) bank_name = "drum";
+        char buf[160];
+        if (!suffix.empty())
+            SDL_snprintf(buf, sizeof(buf), "%s-%s%s.wav",
+                         bank_name, addition, suffix.c_str());
+        else
+            SDL_snprintf(buf, sizeof(buf), "%s-%s.wav", bank_name, addition);
+        float gain = volume > 0 ? (volume / 100.0f) * cfg_hitsound_vol : cfg_hitsound_vol;
+        return map_bank.play(buf, gain, true);
     };
 
     auto judge_col = [&](int col, double t) -> bool {
@@ -301,11 +393,21 @@ int main(int argc, char* argv[]) {
         double a = best < 0 ? -best : best;
         if (a > ms_win) return false;
 
-        // Layered extras from the note's hitSound bitfield
-        int bits = map.notes[best_i].hit_sound;
-        if (clap_stream    && (bits & 8)) play_sound(clap_stream,    clap_data,    clap_len);
-        if (whistle_stream && (bits & 2)) play_sound(whistle_stream, whistle_data, whistle_len);
-        if (finish_stream  && (bits & 4)) play_sound(finish_stream,  finish_data,  finish_len);
+        // Layered extras from the note's hitSound bitfield, resolved against
+        // the map's own hitsound bank if it ships one.
+        {
+            int bits = map.notes[best_i].hit_sound;
+            int note_bank = map.notes[best_i].sample_bank;
+            const std::string& note_suffix = map.notes[best_i].sample_suffix;
+            int note_vol = map.notes[best_i].sample_volume;
+
+            if ((bits & 8) && !play_note_sample(note_bank, "hitclap", note_suffix, note_vol))
+                play_sound(clap_stream, clap_data, clap_len);
+            if ((bits & 2) && !play_note_sample(note_bank, "hitwhistle", note_suffix, note_vol))
+                play_sound(whistle_stream, whistle_data, whistle_len);
+            if ((bits & 4) && !play_note_sample(note_bank, "hitfinish", note_suffix, note_vol))
+                play_sound(finish_stream, finish_data, finish_len);
+        }
 
         if (map.notes[best_i].is_hold) {
             hold_started[best_i] = true;
@@ -338,6 +440,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<SongEntry> songs =
         scan_songs("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs");
+
     int   selected_index = 0;
     float song_scroll    = 0.0f;
 
@@ -354,22 +457,58 @@ int main(int argc, char* argv[]) {
     bool  settings_dirty = false;
     int   settings_row   = -1;      // which slider is being dragged, -1 = none
     int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
+    // Background image cache for song select (declared BEFORE the loader lambda)
+    SDL_Texture* song_bg_tex   = nullptr;
+    std::string  song_bg_folder;
+
+    // Per-map hitsound bank (loaded when a song starts)
+    int          song_bg_w     = 0;
+    int          song_bg_h     = 0;
+
     SDL_Log("SONGS: found %zu entries", songs.size());
 
-    // IMAGE TEST — verify stb_image decode
-    {
+    // Load the background image for a given song index.
+    auto load_song_bg = [&](int idx) -> bool {
+        if (song_bg_tex) { SDL_DestroyTexture(song_bg_tex); song_bg_tex = nullptr; }
+        song_bg_w = song_bg_h = 0;
+        if (idx < 0 || idx >= (int)songs.size()) return false;
+
+        // Prefer the bg path resolved by the scanner (which used the
+        // [Events] declaration), fall back to well-known names.
+        std::string found = songs[idx].bg_path;
+        if (found.empty()) {
+            const char* names[] = {
+                "/bg.jpg", "/BG.jpg", "/Bg.jpg", "/bG.jpg",
+                "/bg.png", "/BG.png", "/Bg.png", "/bG.png",
+                "/bg.jpeg", "/BG.jpeg", "/Bg.jpeg",
+                "/background.jpg", "/background.png"
+            };
+            struct stat st;
+            for (const char* n : names) {
+                std::string c = songs[idx].folder + n;
+                if (stat(c.c_str(), &st) == 0) { found = c; break; }
+            }
+        }
+        if (found.empty()) return false;
+
         int iw = 0, ih = 0;
         uint8_t* px = nullptr;
-        const char* test_bg =
-            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/"
-            "2592336 Sasaki Sayaka - Kiss no Hitotsu de (Short Ver.) (andryzx)/bg.jpg";
-        if (load_image_rgba(test_bg, &iw, &ih, &px)) {
-            SDL_Log("IMAGE TEST: loaded %dx%d (%d bytes)", iw, ih, iw*ih*4);
-            free(px);
-        } else {
-            SDL_Log("IMAGE TEST: failed on %s", test_bg);
+        if (!load_image_rgba(found.c_str(), &iw, &ih, &px)) return false;
+
+        song_bg_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
+                                         SDL_TEXTUREACCESS_STATIC, iw, ih);
+        if (song_bg_tex) {
+            SDL_UpdateTexture(song_bg_tex, NULL, px, iw * 4);
+            SDL_SetTextureBlendMode(song_bg_tex, SDL_BLENDMODE_BLEND);
+            song_bg_w = iw;
+            song_bg_h = ih;
+            SDL_Log("BG: loaded %dx%d from %s", iw, ih, found.c_str());
         }
-    }
+        free(px);
+        return song_bg_tex != nullptr;
+    };
+
+
 
     int report_count = 0;
     bool   running  = true;
@@ -407,6 +546,7 @@ int main(int argc, char* argv[]) {
     float menu_btn_w = 0.0f;
     float menu_btn_h = 0.0f;
     float menu_btn_y[3] = { 0.0f, 0.0f, 0.0f };
+
 
     while (running) {
         Uint64 frame_start = SDL_GetTicksNS() / 1000ULL;
@@ -540,7 +680,7 @@ int main(int argc, char* argv[]) {
                 else if (e.key.key == SDLK_K) col = 3;
                 if (col >= 0 && col < keys) {
                     column_pressed[col] = true;
-                    play_sound(hit_stream, hit_data, hit_len);
+                    play_note_normal_hitsound();
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -616,7 +756,15 @@ int main(int argc, char* argv[]) {
                         float ty = e.tfinger.y * (float)win_h;
                         int hit = (int)((ty - list_y + song_scroll) / row_h);
                         if (hit >= 0 && hit < (int)songs.size()) {
-                            selected_index = hit;
+                            // Tap UX: first tap selects (and previews bg),
+                            // second tap on the same row plays.
+                            if (hit != selected_index) {
+                                selected_index = hit;
+                                SDL_Log("SONGS: preview %d", hit);
+                                continue;
+                            }
+
+                            // second tap plays
                             const auto& s = songs[hit];
                             SDL_Log("SONGS: loading %s [%s]",
                                     s.title.c_str(), s.version.c_str());
@@ -654,6 +802,12 @@ int main(int argc, char* argv[]) {
                                 if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
                                 if (wav_data)     { SDL_free(wav_data); wav_data = nullptr; }
                                 SDL_AudioSpec spec = {};
+                                // Load per-map hitsounds from the song folder
+                                map_bank.load_from_folder(s.folder);
+                                SDL_Log("HITS: bank loaded %zu samples from %s",
+                                        map_bank.has("soft-hitnormal.wav") ? 1 : 0,
+                                        s.folder.c_str());
+
                                 if (load_audio_to_pcm(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
                                     audio_stream = SDL_OpenAudioDeviceStream(
                                         SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
@@ -845,7 +999,7 @@ int main(int argc, char* argv[]) {
                     active_fingers.push_back({ e.tfinger.fingerID, col });
                 finger_done:
                     column_pressed[col] = true;
-                    play_sound(hit_stream, hit_data, hit_len);
+                    play_note_normal_hitsound();
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -899,7 +1053,7 @@ int main(int argc, char* argv[]) {
                             note_judged[hi]  = true;
                             cnt_miss++;
                             combo = 0;
-                            play_sound(miss_stream, miss_data, miss_len);
+                            play_miss_sound();
                         } else {
                             // Released cleanly at/after tail — LN resolves
                             hold_active[hi]  = false;
@@ -914,7 +1068,7 @@ int main(int argc, char* argv[]) {
                 int col = find_col(e.button.x);
                 if (col >= 0) {
                     column_pressed[col] = true;
-                    play_sound(hit_stream, hit_data, hit_len);
+                    play_note_normal_hitsound();
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -931,6 +1085,22 @@ int main(int argc, char* argv[]) {
         }
 
         SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
+
+        // Ensure the correct song bg is loaded while in song select.
+        // Keyed on folder so scrolling between difficulties doesn't reload.
+        if (app_state == AppState::SongSelect &&
+            !songs.empty() &&
+            songs[selected_index].folder != song_bg_folder) {
+            // Only cache the folder when a bg was actually found, otherwise
+            // subsequent songs would be skipped as if already loaded.
+            if (load_song_bg(selected_index))
+                song_bg_folder = songs[selected_index].folder;
+            else
+                song_bg_folder.clear();
+        }
+        // Note: we deliberately DON'T free the bg when leaving song select —
+        // gameplay uses the same texture. It gets replaced on the next song
+        // selection change or freed at app exit.
 
         const Uint64 current_tick = SDL_GetTicks();
         if (!paused && !resuming && !audio_queued && audio_stream &&
@@ -1008,13 +1178,40 @@ int main(int argc, char* argv[]) {
                 note_judged[i] = true;
                 cnt_miss++;
                 combo = 0;
-                play_sound(miss_stream, miss_data, miss_len);
+                play_miss_sound();
             }
             miss_cursor++;
         }
 
         SDL_SetRenderDrawColor(renderer, 20, 20, 30, 255);
         SDL_RenderClear(renderer);
+
+        // GAMEPLAY BG — draw the current song's bg behind the playfield.
+        if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
+            float tex_ar = (float)song_bg_w / song_bg_h;
+            float win_ar = (float)win_w / win_h;
+            SDL_FRect dst;
+            if (win_ar > tex_ar) {
+                float w = (float)win_w;
+                float h = w / tex_ar;
+                dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+            } else {
+                float h = (float)win_h;
+                float w = h * tex_ar;
+                dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+            }
+            SDL_SetTextureAlphaMod(song_bg_tex, 100);
+            SDL_RenderTexture(renderer, song_bg_tex, NULL, &dst);
+        }
+
+        // COLUMN STRIP — dark strip under just the note columns so
+        // notes stay readable over any bg.
+        {
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 170);
+            SDL_FRect strip = { playfield_x, 0.0f, playfield_w, (float)win_h };
+            SDL_RenderFillRect(renderer, &strip);
+        }
 
         // Column separators
         for (int c = 0; c < keys; c++) {
@@ -1032,8 +1229,10 @@ int main(int argc, char* argv[]) {
         }
 
         // Judgement line
+        // JUDGEMENT LINE THICK
         SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
-        SDL_RenderLine(renderer, playfield_x, judgement_y, playfield_x + playfield_w, judgement_y);
+        SDL_FRect jline = { playfield_x, judgement_y - 1.0f, playfield_w, 2.0f };
+        SDL_RenderFillRect(renderer, &jline);
 
         // Notes
         // Visible time window depends on scroll speed. At low speeds a
@@ -1373,10 +1572,32 @@ int main(int argc, char* argv[]) {
 
         // ---- Song select ----
         if (app_state == AppState::SongSelect) {
-            // Full-screen dark bg
+            // BG render — scale-to-cover, then dim overlay
             SDL_SetRenderDrawColor(renderer, 15, 15, 25, 255);
             SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
             SDL_RenderFillRect(renderer, &bg_full);
+
+            if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
+                float tex_ar = (float)song_bg_w / song_bg_h;
+                float win_ar = (float)win_w / win_h;
+                SDL_FRect dst;
+                if (win_ar > tex_ar) {
+                    float w = (float)win_w;
+                    float h = w / tex_ar;
+                    dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                } else {
+                    float h = (float)win_h;
+                    float w = h * tex_ar;
+                    dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                }
+                SDL_SetTextureAlphaMod(song_bg_tex, 180);
+                SDL_RenderTexture(renderer, song_bg_tex, NULL, &dst);
+
+                // Slight further dim so list rows stay legible
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 100);
+                SDL_RenderFillRect(renderer, &bg_full);
+            }
 
             // Title bar
             SDL_SetRenderScale(renderer, 3.0f, 3.0f);

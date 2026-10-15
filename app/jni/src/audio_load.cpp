@@ -5,6 +5,11 @@
 #define DR_MP3_IMPLEMENTATION
 #include "dr_mp3.h"
 
+// Declared in stb_vorbis.c (compiled as a separate translation unit)
+extern "C" int stb_vorbis_decode_filename(const char* filename, int* channels, int* sample_rate, short** output);
+
+#include <vector>
+
 static bool ends_with_ci(const char* s, const char* suf) {
     size_t sl = strlen(s), fl = strlen(suf);
     if (sl < fl) return false;
@@ -57,6 +62,27 @@ bool load_audio_to_pcm(const char* path,
         *out_spec = spec;
         *out_data = reinterpret_cast<uint8_t*>(pcm);
         *out_len  = (uint32_t)(frame_count * cfg.channels * sizeof(int16_t));
+        return true;
+    }
+
+    if (ends_with_ci(path, ".ogg")) {
+        int channels = 0;
+        int sample_rate = 0;
+        short* output = nullptr;
+        int samples = stb_vorbis_decode_filename(path, &channels, &sample_rate, &output);
+        if (samples <= 0 || output == nullptr) {
+            SDL_Log("AUDIO: OGG decode failed for %s", path);
+            return false;
+        }
+
+        SDL_AudioSpec spec = {};
+        spec.format   = SDL_AUDIO_S16;
+        spec.channels = channels;
+        spec.freq     = sample_rate;
+
+        *out_spec = spec;
+        *out_data = reinterpret_cast<uint8_t*>(output);
+        *out_len  = (uint32_t)(samples * channels * sizeof(int16_t));
         return true;
     }
 
