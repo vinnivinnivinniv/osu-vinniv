@@ -82,6 +82,23 @@ Implementation sketch:
   star rating for sort order on converted entries. Mark them with a
   "(Convert)" tag in song select.
 
+## Song progress bar
+Thin horizontal bar across the top (or bottom) of the playfield that
+fills over the song length. Data: track position from audio stream vs
+total audio length. Redraw per frame from a cached texture.
+Reference: osu.Game/Screens/Play/SongProgress.cs
+
+## Settings: per-K key mapping
+Currently keybinds are hardcoded: D F J K for 4K, plus per-note column
+input from touch. Users need to bind keys per column count (1K through
+10K) and save them. Storage: settings.ini entries like
+  keys_4k = D,F,J,K
+  keys_7k = S,D,F,Space,J,K,L
+Parsing: split on comma, store as vector<int> (SDL scancodes).
+Settings screen: keyboard capture mode or text entry.
+Reference: osu.Game.Rulesets.Mania/ManiaInputManager.cs,
+osu.Game/Input/Bindings/*.cs
+
 ## Medium priority
 - Result → song select (currently tap = retry; only Esc goes back)
 - On-screen restart button (R key works)
