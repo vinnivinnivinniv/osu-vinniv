@@ -11,6 +11,22 @@
   Reference: `DrawableManiaRuleset.cs:RelativeScaleBeatLengths`,
   `SequentialScrollAlgorithm.cs` in ppy/osu.
 
+## Asset types
+- **Map thumbnail** — small crop, for song select row preview
+- **Background image** — full bg.jpg / bg.png shown behind gameplay and selected song
+- These are separate assets and need separate load paths. bg.jpg lives
+  in the set folder; thumbnails may not exist in .osz at all (BeatmapExporter
+  can generate them but they're not shipped in every pack).
+
+## Star rating sort
+- Native mania maps: sort by computed mania star rating.
+- Converted std maps: star rating is computed from the std difficulty
+  values, not the mania conversion. So sorting converts by mania stars
+  would misrepresent them.
+- Policy: when the std->mania converter ships, use the original std
+  star rating for sort order on converted entries. Mark them with a
+  "(Convert)" tag in song select.
+
 ## Medium priority
 - Result → song select (currently tap = retry; only Esc goes back)
 - On-screen restart button (R key works)
