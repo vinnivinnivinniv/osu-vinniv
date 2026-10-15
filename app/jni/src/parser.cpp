@@ -47,7 +47,14 @@ bool parse_osu_file(const std::string& path, Beatmap& out) {
             continue;
         }
 
-        if (section == "Metadata") {
+        if (section == "General") {
+            auto pos = t.find(':');
+            if (pos == std::string::npos) continue;
+            std::string k = trim(t.substr(0, pos));
+            std::string v = trim(t.substr(pos + 1));
+            if (k == "AudioFilename") out.audio_file = v;
+        }
+        else if (section == "Metadata") {
             auto pos = t.find(':');
             if (pos == std::string::npos) continue;
             std::string k = trim(t.substr(0, pos));

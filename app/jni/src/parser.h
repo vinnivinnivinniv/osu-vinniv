@@ -18,6 +18,7 @@ struct Beatmap {
     std::string title;
     std::string artist;
     std::string version;
+    std::string audio_file;
     std::vector<Note> notes;
 };
 

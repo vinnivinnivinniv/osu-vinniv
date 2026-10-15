@@ -182,6 +182,32 @@ static void test_hitsound_bits() {
     CHECK_EQ_I(m.notes[4].hit_sound, 10, "whistle+clap bits");
 }
 
+// ---------- test: audio filename ----------
+
+static void test_audio_filename() {
+    std::string s =
+        "osu file format v14\n"
+        "\n"
+        "[General]\n"
+        "AudioFilename: audio.mp3\n"
+        "Mode: 3\n"
+        "\n"
+        "[Difficulty]\n"
+        "CircleSize:4\n"
+        "OverallDifficulty:5\n"
+        "\n"
+        "[TimingPoints]\n"
+        "1000,500,4,2,0,100,1,0\n"
+        "\n"
+        "[HitObjects]\n"
+        "64,192,1000,1,0,0:0:0:0:\n";
+
+    auto path = write_temp(s);
+    Beatmap m;
+    parse_osu_file(path, m);
+    CHECK(m.audio_file == "audio.mp3", "audio filename");
+}
+
 // ---------- test: unsorted input gets sorted ----------
 
 static void test_sorts_by_time() {
@@ -241,6 +267,7 @@ int main() {
     test_sorts_by_time();
     test_utf8_bom();
     test_hitsound_bits();
+    test_audio_filename();
 
     std::printf("\n%d test(s) run, %d failed\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;

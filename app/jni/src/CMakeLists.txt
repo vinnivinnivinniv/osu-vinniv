@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(main SHARED
     main.cpp
     parser.cpp
+    song_select.cpp
 )
 
 find_library(GLESv3 GLESv3 REQUIRED)
