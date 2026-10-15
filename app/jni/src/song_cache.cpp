@@ -44,7 +44,7 @@ bool load_song_cache(const std::string& path, time_t expected_mtime,
     std::string line;
     if (!std::getline(f, line)) return false;
     if (line.size() < 3) return false;
-    if (line.compare(0, 2, "v3") != 0) return false;
+    if (line.compare(0, 2, "v4") != 0) return false;
     long long cached_mtime = std::atoll(line.c_str() + 3);
     if ((long long)expected_mtime != cached_mtime) return false;
 
@@ -83,7 +83,7 @@ void save_song_cache(const std::string& path, time_t mtime,
     std::ofstream f(path);
     if (!f.is_open()) return;
 
-    f << "v3 " << (long long)mtime << "\n";
+    f << "v4 " << (long long)mtime << "\n";
     for (const auto& e : entries) {
         f << esc(e.folder)     << "|"
           << esc(e.osu_path)   << "|"
