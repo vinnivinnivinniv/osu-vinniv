@@ -125,8 +125,64 @@ int main(int argc, char* argv[]) {
     float cfg_hitsound_vol = 1.0f;
     float cfg_scroll_speed = 1.5f;
     int   cfg_fps_cap      = 120;   // 0 = uncapped
-    double cfg_audio_offset_ms = 0.0;
+    float cfg_audio_offset_ms = 0.0f;
     bool  vsync_enabled    = (cfg_fps_cap == 120);
+
+    // ---- settings rows (single table drives render + touch) ----
+    struct SettingRow {
+        const char* label;
+        int         type;          // 0=slider, 1=cycle, 2=keybind
+        void*       target;        // float* (slider) or int* (cycle)
+        float       min_val;
+        float       max_val;
+        const char* cycle_labels[4];
+        int         cycle_values[4];
+        int         cycle_count;
+        int         key_count;
+    };
+    SettingRow setting_rows[] = {
+        { "Music Volume",    0, &cfg_music_vol,        0.0f,   1.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
+        { "Hitsound Volume", 0, &cfg_hitsound_vol,     0.0f,   2.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
+        { "Scroll Speed",    0, &cfg_scroll_speed,     1.0f,  40.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
+        { "FPS Cap",         1, &cfg_fps_cap,          0.0f,   0.0f,
+            {"60","120","240","Uncapped"}, {60,120,240,0}, 4, 0 },
+        { "Audio Offset",    0, &cfg_audio_offset_ms, -200.f, 200.f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
+        { "4K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  4 },
+        { "5K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  5 },
+        { "6K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  6 },
+        { "7K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  7 },
+        { "8K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  8 },
+        { "9K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  9 },
+        { "10K Keys",        2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 10 },
+    };
+    const int ROW_COUNT = (int)(sizeof(setting_rows) / sizeof(setting_rows[0]));
+
+    // row geometry (shared by render + touch)
+    const float settings_row_x   = 80.0f;
+    const float settings_row_y0  = 120.0f;
+    const float settings_row_h   = 60.0f;
+    const float settings_row_gap = 8.0f;
+
+    auto save_settings = [&]() {
+        FILE* f = fopen("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini", "w");
+        if (!f) return;
+        fprintf(f, "music_volume=%.3f\n",    cfg_music_vol);
+        fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
+        fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
+        fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
+        fprintf(f, "audio_offset_ms=%.3f\n", cfg_audio_offset_ms);
+        for (int nk = 1; nk <= 10; nk++) {
+            fprintf(f, "keys_%dk=", nk);
+            for (size_t i = 0; i < bindings[nk].size(); i++) {
+                if (i) fprintf(f, ",");
+                const char* nm = SDL_GetKeyName(bindings[nk][i]);
+                fprintf(f, "%s", nm ? nm : "?");
+            }
+            fprintf(f, "\n");
+        }
+        fclose(f);
+        SDL_Log("SETTINGS: saved");
+    };
     {
         std::ifstream sf("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini");
         std::string line;
@@ -559,7 +615,9 @@ int main(int argc, char* argv[]) {
 
     // Settings state
     bool  settings_dirty = false;
-    int   settings_row   = -1;      // which slider is being dragged, -1 = none
+    int   settings_row   = -1;      // which row is being dragged, -1 = none
+    int   capture_nk     = 0;       // 0 = not capturing, else target key count
+    std::vector<SDL_Keycode> capture_progress;
     int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
     // Background image cache for song select (declared BEFORE the loader lambda)
     SDL_Texture* song_bg_tex   = nullptr;
@@ -665,6 +723,33 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_EVENT_QUIT ||
                 e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                 running = false;
+            }
+
+            // ---- key capture (settings) — consumes all key events ----
+            if (app_state == AppState::Settings && capture_nk > 0) {
+                if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
+                    if (e.key.key == SDLK_ESCAPE || e.key.key == SDLK_AC_BACK) {
+                        capture_nk = 0;
+                        capture_progress.clear();
+                        SDL_Log("SETTINGS: capture canceled");
+                    } else {
+                        bool dup = false;
+                        for (auto k : capture_progress) if (k == e.key.key) { dup = true; break; }
+                        if (!dup) {
+                            capture_progress.push_back(e.key.key);
+                            SDL_Log("SETTINGS: capture %dK [%zu/%d] %s",
+                                    capture_nk, capture_progress.size(), capture_nk,
+                                    SDL_GetKeyName(e.key.key));
+                            if ((int)capture_progress.size() == capture_nk) {
+                                bindings[capture_nk] = capture_progress;
+                                save_settings();
+                                capture_nk = 0;
+                                capture_progress.clear();
+                            }
+                        }
+                    }
+                }
+                continue;
             }
             // BACK -> pause toggle (was quit; quit is in the menu now)
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
@@ -951,103 +1036,67 @@ int main(int argc, char* argv[]) {
             // SETTINGS TOUCH
             if (app_state == AppState::Settings) {
                 float stx = 0.0f, sty = 0.0f;
-                if (e.type == SDL_EVENT_FINGER_DOWN ||
-                    e.type == SDL_EVENT_FINGER_MOTION ||
-                    e.type == SDL_EVENT_FINGER_UP) {
+                bool has_xy = (e.type == SDL_EVENT_FINGER_DOWN ||
+                               e.type == SDL_EVENT_FINGER_MOTION ||
+                               e.type == SDL_EVENT_FINGER_UP);
+                if (has_xy) {
                     stx = e.tfinger.x * (float)win_w;
                     sty = e.tfinger.y * (float)win_h;
                 }
 
                 if (e.type == SDL_EVENT_FINGER_DOWN) {
-                    // Back button (bottom-left region)
-                    if (stx < 400.0f && sty > (float)win_h - 200.0f) {
+                    // Back button (bottom-left)
+                    if (stx < 400.0f && sty > (float)win_h - 120.0f) {
+                        capture_nk = 0;
+                        capture_progress.clear();
                         app_state = AppState::SongSelect;
                         SDL_Log("SETTINGS: back button");
                         continue;
                     }
 
-                    const float row_x  = 80.0f;
-                    const float row_w  = (float)win_w - 160.0f;
-                    const float row_h  = 100.0f;
-                    const float row_y0 = 200.0f;
-                    const float gap    = 20.0f;
-
-                    for (int i = 0; i < 5; i++) {
-                        float ry = row_y0 + i * (row_h + gap);
+                    const float row_x = settings_row_x;
+                    const float row_w = (float)win_w - 2.0f * settings_row_x;
+                    for (int i = 0; i < ROW_COUNT; i++) {
+                        float ry = settings_row_y0 + i * (settings_row_h + settings_row_gap);
                         if (stx >= row_x && stx <= row_x + row_w &&
-                            sty >= ry && sty <= ry + row_h) {
-                            settings_row = i;
-                            SDL_Log("SETTINGS: row %d selected", i);
+                            sty >= ry && sty <= ry + settings_row_h) {
+                            if (setting_rows[i].type == 2) {
+                                capture_nk = setting_rows[i].key_count;
+                                capture_progress.clear();
+                                settings_row = -1;
+                                SDL_Log("SETTINGS: capture %dK", capture_nk);
+                            } else {
+                                settings_row = i;
+                                SDL_Log("SETTINGS: row %d selected", i);
+                            }
                             break;
                         }
                     }
                     continue;
                 }
 
-                if (e.type == SDL_EVENT_FINGER_MOTION) {
-                    if (settings_row < 0) {
-                        const float row_x  = 80.0f;
-                        const float row_w  = (float)win_w - 160.0f;
-                        const float row_h  = 100.0f;
-                        const float row_y0 = 200.0f;
-                        const float gap    = 20.0f;
-                        for (int i = 0; i < 5; i++) {
-                            float ry = row_y0 + i * (row_h + gap);
-                            if (stx >= row_x && stx <= row_x + row_w &&
-                                sty >= ry && sty <= ry + row_h) {
-                                settings_row = i;
-                                break;
-                            }
-                        }
-                    }
+                if (e.type == SDL_EVENT_FINGER_MOTION && settings_row >= 0) {
+                    const float row_x = settings_row_x;
+                    const float row_w = (float)win_w - 2.0f * settings_row_x;
+                    float norm = (stx - row_x) / row_w;
+                    if (norm < 0.0f) norm = 0.0f;
+                    if (norm > 1.0f) norm = 1.0f;
 
-                    if (settings_row >= 0) {
-                        const float row_x = 80.0f;
-                        const float row_w = (float)win_w - 160.0f;
-                        float norm = (stx - row_x) / row_w;
-                        if (norm < 0.0f) norm = 0.0f;
-                        if (norm > 1.0f) norm = 1.0f;
-
-                        if      (settings_row == 0) cfg_music_vol    = norm * 1.0f;
-                        else if (settings_row == 1) cfg_hitsound_vol = norm * 2.0f;
-                        else if (settings_row == 2) cfg_scroll_speed = 1.0f + norm * 39.0f;
-                        else if (settings_row == 4) {
-                        cfg_audio_offset_ms = (norm - 0.5f) * 400.0f;
+                    auto& row = setting_rows[settings_row];
+                    if (row.type == 0) {
+                        float* t = (float*)row.target;
+                        *t = row.min_val + norm * (row.max_val - row.min_val);
+                    } else if (row.type == 1) {
+                        int idx = (int)(norm * row.cycle_count);
+                        if (idx >= row.cycle_count) idx = row.cycle_count - 1;
+                        *((int*)row.target) = row.cycle_values[idx];
                     }
-                    else if (settings_row == 3) {
-                            int preset = (int)(norm * 4.0f);
-                            if      (preset == 0) cfg_fps_cap = 60;
-                            else if (preset == 1) cfg_fps_cap = 120;
-                            else if (preset == 2) cfg_fps_cap = 240;
-                            else                  cfg_fps_cap = 0;
-                        }
-                        settings_dirty = true;
-                    }
+                    settings_dirty = true;
                     continue;
                 }
 
                 if (e.type == SDL_EVENT_FINGER_UP) {
-                    if (settings_row >= 0) {
-                        FILE* f = fopen("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini", "w");
-                        if (f) {
-                            fprintf(f, "music_volume=%.3f\n",    cfg_music_vol);
-                            fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
-                            fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
-                            fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
-                            fprintf(f, "audio_offset_ms=%.3f\n", cfg_audio_offset_ms);
-                            for (int nk = 1; nk <= 10; nk++) {
-                                fprintf(f, "keys_%dk=", nk);
-                                for (size_t i = 0; i < bindings[nk].size(); i++) {
-                                    if (i) fprintf(f, ",");
-                                    const char* nm = SDL_GetKeyName(bindings[nk][i]);
-                                    fprintf(f, "%s", nm ? nm : "?");
-                                }
-                                fprintf(f, "\n");
-                            }
-                            fclose(f);
-                            SDL_Log("SETTINGS: saved");
-                        }
-                    }
+                    if (settings_row >= 0) save_settings();
                     settings_row = -1;
                     continue;
                 }
@@ -1055,7 +1104,6 @@ int main(int argc, char* argv[]) {
                 // Any other event while in settings is consumed
                 continue;
             }
-
             if (e.type == SDL_EVENT_FINGER_DOWN && paused) {
                 // Pause menu hit-test. Buttons laid out in draw block.
                 float tx = e.tfinger.x * (float)win_w;
@@ -1662,93 +1710,87 @@ int main(int argc, char* argv[]) {
             SDL_RenderDebugText(renderer, 8.0f, 6.0f, "Settings");
             SDL_SetRenderScale(renderer, 1.0f, 1.0f);
 
-            const float row_x     = 80.0f;
-            const float row_w     = (float)win_w - 160.0f;
-            const float row_h     = 100.0f;
-            const float row_y0    = 200.0f;
-            const float row_gap   = 20.0f;
-            const float label_gap = 12.0f;
+            const float row_x = settings_row_x;
+            const float row_w = (float)win_w - 2.0f * settings_row_x;
 
-            // Rows: 0=music volume, 1=hitsound volume, 2=scroll speed, 3=fps cap
-            const char* labels[5] = {
-                "Music Volume",
-                "Hitsound Volume",
-                "Scroll Speed",
-                "FPS Cap",
-                "Audio Offset"
-            };
+            for (int i = 0; i < ROW_COUNT; i++) {
+                const auto& row = setting_rows[i];
+                float ry = settings_row_y0 + i * (settings_row_h + settings_row_gap);
+                bool capturing_this = (row.type == 2 && capture_nk == row.key_count);
 
-            float values[5] = {
-                cfg_music_vol,
-                cfg_hitsound_vol,
-                cfg_scroll_speed,
-                (float)cfg_fps_cap,
-                (float)cfg_audio_offset_ms
-            };
-
-            for (int i = 0; i < 5; i++) {
-                float ry = row_y0 + i * (row_h + row_gap);
-
-                // Label
-                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
-                SDL_SetRenderDrawColor(renderer, 220, 220, 240, 255);
-                SDL_RenderDebugText(renderer, row_x/3.0f, (ry - 30.0f)/3.0f, labels[i]);
-                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
-
-                // Bar background
-                SDL_SetRenderDrawColor(renderer, 40, 45, 60, 255);
-                SDL_FRect bar = { row_x, ry, row_w, row_h };
+                // Row background
+                if (capturing_this) SDL_SetRenderDrawColor(renderer, 90, 60, 40, 255);
+                else                SDL_SetRenderDrawColor(renderer, 40, 45, 60, 255);
+                SDL_FRect bar = { row_x, ry, row_w, settings_row_h };
                 SDL_RenderFillRect(renderer, &bar);
 
-                // Value fill
+                // Fill / highlight
+                char buf[128];
+                buf[0] = 0;
                 float fill = 0.0f;
-                if      (i == 0) fill = cfg_music_vol    / 1.0f;
-                else if (i == 1) fill = cfg_hitsound_vol / 2.0f;  // 0..2 range
-                else if (i == 2) fill = (cfg_scroll_speed - 1.0f) / 39.0f;  // 1.0..40.0
-                else if (i == 4) fill = (cfg_audio_offset_ms + 200.0f) / 400.0f;
-                else if (i == 3) {
-                    int preset = 0;
-                    if      (cfg_fps_cap == 60)  preset = 0;
-                    else if (cfg_fps_cap == 120) preset = 1;
-                    else if (cfg_fps_cap == 240) preset = 2;
-                    else if (cfg_fps_cap == 0)   preset = 3;
-                    fill = (preset + 0.5f) / 4.0f;
+                if (row.type == 0) {
+                    float v = *(float*)row.target;
+                    fill = (v - row.min_val) / (row.max_val - row.min_val);
+                    if (row.target == (void*)&cfg_audio_offset_ms)
+                        SDL_snprintf(buf, sizeof(buf), "%+.0f ms", v);
+                    else
+                        SDL_snprintf(buf, sizeof(buf), "%.2f", v);
+                } else if (row.type == 1) {
+                    int v = *(int*)row.target;
+                    int idx = 0;
+                    for (int k = 0; k < row.cycle_count; k++)
+                        if (row.cycle_values[k] == v) idx = k;
+                    fill = (idx + 0.5f) / row.cycle_count;
+                    SDL_snprintf(buf, sizeof(buf), "%s", row.cycle_labels[idx]);
+                } else if (row.type == 2) {
+                    // build binding display string
+                    int nk = row.key_count;
+                    const auto& b = bindings[nk];
+                    int len = 0;
+                    if (capturing_this) {
+                        len += SDL_snprintf(buf + len, sizeof(buf) - len, "[%zu/%d] ",
+                                            capture_progress.size(), nk);
+                        for (int k = 0; k < nk && len < (int)sizeof(buf) - 16; k++) {
+                            if ((size_t)k < capture_progress.size()) {
+                                const char* nm = SDL_GetKeyName(capture_progress[k]);
+                                len += SDL_snprintf(buf + len, sizeof(buf) - len, "%s ", nm ? nm : "?");
+                            } else {
+                                len += SDL_snprintf(buf + len, sizeof(buf) - len, "_ ");
+                            }
+                        }
+                    } else {
+                        for (size_t k = 0; k < b.size() && len < (int)sizeof(buf) - 16; k++) {
+                            const char* nm = SDL_GetKeyName(b[k]);
+                            len += SDL_snprintf(buf + len, sizeof(buf) - len, "%s ", nm ? nm : "?");
+                        }
+                    }
                 }
                 if (fill < 0.0f) fill = 0.0f;
                 if (fill > 1.0f) fill = 1.0f;
-
-                SDL_SetRenderDrawColor(renderer, 90, 160, 240, 255);
-                SDL_FRect filled = { row_x, ry, row_w * fill, row_h };
-                SDL_RenderFillRect(renderer, &filled);
-
-                // Value text on the right side
-                char buf[64];
-                if      (i == 0) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_music_vol);
-                else if (i == 1) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_hitsound_vol);
-                else if (i == 2) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_scroll_speed);
-                else if (i == 4) fill = (cfg_audio_offset_ms + 200.0f) / 400.0f;
-                else if (i == 3) {
-                    if      (cfg_fps_cap == 0)   SDL_snprintf(buf, sizeof(buf), "uncapped");
-                    else                          SDL_snprintf(buf, sizeof(buf), "%d", cfg_fps_cap);
+                if (row.type != 2) {
+                    SDL_SetRenderDrawColor(renderer, 90, 160, 240, 255);
+                    SDL_FRect filled = { row_x, ry, row_w * fill, settings_row_h };
+                    SDL_RenderFillRect(renderer, &filled);
                 }
-                else if (i == 4) SDL_snprintf(buf, sizeof(buf), "%+.0f ms", cfg_audio_offset_ms);
 
-                SDL_SetRenderScale(renderer, 4.0f, 4.0f);
+                // Label (small, top-left)
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                SDL_SetRenderDrawColor(renderer, 200, 200, 220, 255);
+                SDL_RenderDebugText(renderer, (row_x + 8.0f) / 2.0f, (ry + 4.0f) / 2.0f, row.label);
+
+                // Value / binding (3x, bottom-left)
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
                 SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-                float tx = (row_x + row_w) / 4.0f - 8.0f * 8.0f;
-                float ty = ry / 4.0f + (row_h / 4.0f - 8.0f) * 0.5f;
-                SDL_RenderDebugText(renderer, tx, ty, buf);
+                SDL_RenderDebugText(renderer, (row_x + 8.0f) / 3.0f, (ry + 26.0f) / 3.0f, buf);
                 SDL_SetRenderScale(renderer, 1.0f, 1.0f);
             }
 
             // Back button
             SDL_SetRenderScale(renderer, 3.0f, 3.0f);
             SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
-            SDL_RenderDebugText(renderer, 8.0f,
-                (float)win_h/3.0f - 30.0f, "back");
+            SDL_RenderDebugText(renderer, 8.0f, (float)win_h / 3.0f - 30.0f, "back");
             SDL_SetRenderScale(renderer, 1.0f, 1.0f);
         }
-
         // ---- Song select ----
         if (app_state == AppState::SongSelect) {
             // BG render — scale-to-cover, then dim overlay
