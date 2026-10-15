@@ -8,6 +8,7 @@
 #include "parser.h"
 #include "song_select.h"
 #include "osz_import.h"
+#include "audio_load.h"
 
 enum class AppState { SongSelect, Playing, Result };
 
@@ -102,7 +103,7 @@ int main(int argc, char* argv[]) {
     Uint32  wav_len  = 0;
     SDL_AudioStream* audio_stream = nullptr;
     const char* audio_path = "/sdcard/Android/data/sh.ppy.osuvinniv/files/audio.wav";
-    if (SDL_LoadWAV(audio_path, &wav_spec, &wav_data, &wav_len)) {
+    if (load_audio_to_pcm(audio_path, &wav_spec, &wav_data, &wav_len)) {
         SDL_Log("AUDIO: loaded %d Hz, %d ch, %u bytes",
                 wav_spec.freq, wav_spec.channels, wav_len);
         audio_stream = SDL_OpenAudioDeviceStream(
@@ -118,7 +119,7 @@ int main(int argc, char* argv[]) {
     Uint8*  hit_data = nullptr;
     Uint32  hit_len  = 0;
     SDL_AudioStream* hit_stream = nullptr;
-    if (SDL_LoadWAV("/sdcard/Android/data/sh.ppy.osuvinniv/files/hit.wav",
+    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/hit.wav",
                     &hit_spec, &hit_data, &hit_len)) {
         SDL_Log("HIT: loaded %d Hz, %d ch, %u bytes",
                 hit_spec.freq, hit_spec.channels, hit_len);
@@ -137,7 +138,7 @@ int main(int argc, char* argv[]) {
     Uint8*  miss_data = nullptr;
     Uint32  miss_len  = 0;
     SDL_AudioStream* miss_stream = nullptr;
-    if (SDL_LoadWAV("/sdcard/Android/data/sh.ppy.osuvinniv/files/miss.wav",
+    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/miss.wav",
                     &miss_spec, &miss_data, &miss_len)) {
         SDL_Log("MISS: loaded %d Hz, %u bytes", miss_spec.freq, miss_len);
         miss_stream = SDL_OpenAudioDeviceStream(
@@ -171,7 +172,7 @@ int main(int argc, char* argv[]) {
             SDL_snprintf(path, sizeof(path),
                 "/sdcard/Android/data/sh.ppy.osuvinniv/files/%s.wav", e.name);
             SDL_AudioSpec spec = {};
-            if (SDL_LoadWAV(path, &spec, e.d, e.l)) {
+            if (load_audio_to_pcm(path, &spec, e.d, e.l)) {
                 *e.s = SDL_OpenAudioDeviceStream(
                     SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
                 if (*e.s) {
@@ -187,7 +188,7 @@ int main(int argc, char* argv[]) {
     Uint8*  cd_data = nullptr;
     Uint32  cd_len  = 0;
     SDL_AudioStream* countdown_sfx_stream = nullptr;
-    if (SDL_LoadWAV("/sdcard/Android/data/sh.ppy.osuvinniv/files/countdown.wav",
+    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/countdown.wav",
                     &cd_spec, &cd_data, &cd_len)) {
         countdown_sfx_stream = SDL_OpenAudioDeviceStream(
             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &cd_spec, nullptr, nullptr);
@@ -539,7 +540,7 @@ int main(int argc, char* argv[]) {
                     if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
                     if (wav_data)     { SDL_free(wav_data); wav_data = nullptr; }
                     SDL_AudioSpec spec = {};
-                    if (SDL_LoadWAV(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
+                    if (load_audio_to_pcm(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
                         audio_stream = SDL_OpenAudioDeviceStream(
                             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
                         if (audio_stream)

@@ -42,20 +42,21 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     if (slash != std::string::npos) folder = folder.substr(0, slash);
 
     if (!m.audio_file.empty()) {
-        // Prefer .wav over the declared extension — SDL3 can't decode MP3,
-        // and we convert to wav during import.
+        // Use whatever the .osu declares. Now that dr_mp3 handles mp3
+        // on Android, both .wav and .mp3 work.
         std::string declared = join(folder, m.audio_file);
-        auto dot = m.audio_file.find_last_of('.');
-        std::string base = (dot != std::string::npos)
-                         ? m.audio_file.substr(0, dot)
-                         : m.audio_file;
-        std::string wav_path = join(folder, base + ".wav");
 
+        // Sanity: if declared doesn't exist, try a .wav swap in case the
+        // original was converted at import time.
         struct stat st;
-        if (stat(wav_path.c_str(), &st) == 0) {
-            e.audio_path = wav_path;
+        if (stat(declared.c_str(), &st) == 0) {
+            e.audio_path = declared;
         } else {
-            e.audio_path = declared;  // fall back to declared (may fail if mp3)
+            auto dot = m.audio_file.find_last_of('.');
+            std::string base = (dot != std::string::npos)
+                             ? m.audio_file.substr(0, dot)
+                             : m.audio_file;
+            e.audio_path = join(folder, base + ".wav");
         }
     } else {
         e.audio_path = join(folder, "audio.wav");
@@ -100,5 +101,18 @@ std::vector<SongEntry> scan_songs(const std::string& root) {
         if (a.title  != b.title)  return a.title  < b.title;
         return a.version < b.version;
     });
-    return out;
+
+    // dedupe by (artist, title, version) — keep the first occurrence
+    std::vector<SongEntry> unique;
+    unique.reserve(out.size());
+    for (auto& e : out) {
+        bool dup = false;
+        for (auto& u : unique) {
+            if (u.artist  == e.artist  &&
+                u.title   == e.title   &&
+                u.version == e.version) { dup = true; break; }
+        }
+        if (!dup) unique.push_back(e);
+    }
+    return unique;
 }
