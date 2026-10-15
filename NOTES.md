@@ -70,6 +70,10 @@ sound wrong. Most ranked maps use the default soft/normal banks, so
 impact is moderate until we support custom banks.
 
 ## Mapper-set scroll speed (SV / BPM)
+
+**See `docs/scroll.md` for the current implementation.** The section
+below is the original design sketch, kept for context. It predates
+the port and does not match what shipped; trust `docs/scroll.md`.
 Currently scroll_pps is constant for the whole map, from the user's
 global scroll_speed setting. Real behavior:
 
@@ -163,6 +167,32 @@ would need to become position-based, like lazer's
 - Policy: when the std->mania converter ships, use the original std
   star rating for sort order on converted entries. Mark them with a
   "(Convert)" tag in song select.
+
+## Async song scan
+
+Cold-cache startup blocks the main thread for 5-10 s while 500+ `.osu`
+files are parsed for metadata. Same class as the old preview decode:
+work that must happen, on the thread that draws.
+
+Fix shape (mirrors `PreviewPlayer`):
+- `scan_songs()` already returns a `std::vector<SongEntry>`; make it
+  callable from a worker.
+- `main()` starts the worker on first frame, shows the song select
+  screen immediately with an empty list + `Scanning...` label.
+- Worker posts progress (files parsed / total) via an atomic; main
+  draws it.
+- On completion, worker hands back the vector under a mutex, main
+  swaps and stops showing the label.
+- Cache-hit path stays synchronous — reading `songs.index` is ~10 ms.
+  Only the rescan path needs the worker.
+
+Edge cases to watch:
+- Tap during scan — entries `songs` may be empty; hit-test must
+  bail if `songs.empty()`.
+- Preview/bg pointers into `songs[i]` need re-anchoring when the
+  vector is replaced.
+- Two rapid cold starts (user force-quits mid-scan) — worker must be
+  joinable on shutdown, no detached threads.
 
 ## Song progress bar
 Thin horizontal bar across the top (or bottom) of the playfield that
