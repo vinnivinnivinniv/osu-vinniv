@@ -1243,7 +1243,8 @@ int main(int argc, char* argv[]) {
         }
 
         // Result screen trigger: all notes done + 2 seconds grace
-        if (!result_shown && !paused && !resuming &&
+        if (app_state == AppState::Playing &&
+            !result_shown && !paused && !resuming &&
             !map.notes.empty() &&
             now_ms > last_note_end + 2000.0)
         {
