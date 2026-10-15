@@ -5,6 +5,12 @@
 #include <vector>
 #include "parser.h"
 
+// Piecewise-linear OD interpolation. Anchor points are (od0, od5, od10).
+static double od_window(double od, double v0, double v5, double v10) {
+    if (od < 5.0) return v0 + (od / 5.0) * (v5 - v0);
+    return v5 + ((od - 5.0) / 5.0) * (v10 - v5);
+}
+
 int main(int argc, char* argv[]) {
     SDL_Log("OSUVINNIV_MAIN_ENTERED argc=%d", argc);
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
@@ -158,7 +164,8 @@ int main(int argc, char* argv[]) {
     std::vector<double> note_hit_time(map.notes.size(), -1.0);
     bool  column_pressed[16] = {false};
     int   combo = 0, max_combo = 0;
-    int   cnt_300 = 0, cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
+    int   cnt_perfect = 0, cnt_300 = 0, cnt_200 = 0;
+    int   cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
     std::vector<bool>   hold_active(map.notes.size(), false);
     std::vector<bool>   hold_started(map.notes.size(), false);
@@ -187,18 +194,26 @@ int main(int argc, char* argv[]) {
 
     auto judge_col = [&](int col, double t) -> bool {
         double map_t = t - (double)audio_start_tick;
+        double od = map.od;
+        double p_win  = std::floor(od_window(od, 22.4, 19.4, 13.9)) + 0.5;
+        double g_win  = std::floor(od_window(od, 64, 49, 34)) + 0.5;
+        double gd_win = std::floor(od_window(od, 97, 82, 67)) + 0.5;
+        double ok_win = std::floor(od_window(od, 127, 112, 97)) + 0.5;
+        double mh_win = std::floor(od_window(od, 151, 136, 121)) + 0.5;
+        double ms_win = std::floor(od_window(od, 188, 173, 158)) + 0.5;
+
         double best = 1e9; int best_i = -1;
         for (size_t i = 0; i < map.notes.size(); i++) {
             if (note_judged[i]) continue;
             if (map.notes[i].column != col) continue;
             double d = map.notes[i].time - map_t;
-            if (d < -80.0) continue;
+            if (d < -ms_win) continue;
             if (d < best) { best = d; best_i = (int)i; }
-            if (d > 80.0) break;
+            if (d > ms_win) break;
         }
         if (best_i < 0) return false;
         double a = best < 0 ? -best : best;
-        if (a > 70.0) return false;
+        if (a > ms_win) return false;
         if (map.notes[best_i].is_hold) {
             hold_started[best_i] = true;
             hold_active[best_i]  = true;
@@ -206,9 +221,12 @@ int main(int argc, char* argv[]) {
         } else {
             note_judged[best_i] = true;
         }
-        if      (a <= 22.0) cnt_300++;
-        else if (a <= 45.0) cnt_100++;
-        else                cnt_50++;
+        if      (a <= p_win)  cnt_perfect++;
+        else if (a <= g_win)  cnt_300++;
+        else if (a <= gd_win) cnt_200++;
+        else if (a <= ok_win) cnt_100++;
+        else if (a <= mh_win) cnt_50++;
+        else                  cnt_miss++;
         combo++;
         if (combo > max_combo) max_combo = combo;
         return true;
@@ -458,7 +476,7 @@ int main(int argc, char* argv[]) {
                 // Tail cap — same color as head, drawn only if on screen.
                 if (y_end > -50.0f && y_end < win_h + 50.0f) {
                     SDL_SetRenderDrawColor(renderer, cr, cg, cb, ca);
-                    SDL_FRect tail = { x + 2.0f, y_end - h * 0.5f, w, h };
+                    SDL_FRect tail = { x + 2.0f, y_end - h, w, h };
                     SDL_RenderFillRect(renderer, &tail);
                 }
             }
@@ -495,25 +513,24 @@ int main(int argc, char* argv[]) {
 
                 SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
 
-                char buf[128];
+                char buf[160];
                 int x = 6, y = 6, lh = 14;
 
-                SDL_snprintf(buf, sizeof(buf), "Combo: %d", combo);
+                SDL_snprintf(buf, sizeof(buf), "Combo: %d   Max: %d",
+                             combo, max_combo);
                 SDL_RenderDebugText(renderer, (float)x, (float)y, buf); y += lh;
 
-                SDL_snprintf(buf, sizeof(buf), "Max: %d", max_combo);
+                SDL_snprintf(buf, sizeof(buf), "P:%d 300:%d 200:%d 100:%d 50:%d M:%d",
+                             cnt_perfect, cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss);
                 SDL_RenderDebugText(renderer, (float)x, (float)y, buf); y += lh;
 
-                SDL_snprintf(buf, sizeof(buf), "300:%d 100:%d 50:%d Miss:%d",
-                             cnt_300, cnt_100, cnt_50, cnt_miss);
-                SDL_RenderDebugText(renderer, (float)x, (float)y, buf); y += lh;
-
-                int total = cnt_300 + cnt_100 + cnt_50;
+                int total = cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss;
                 double acc = 0.0;
-                if (total + cnt_miss > 0)
-                    acc = (cnt_300*300.0 + cnt_100*100.0 + cnt_50*50.0)
-                        / ((total + cnt_miss) * 300.0) * 100.0;
-                SDL_snprintf(buf, sizeof(buf), "Acc: %.2f%%  FPS: %d", acc, hud_fps);
+                if (total > 0)
+                    acc = (cnt_perfect*300.0 + cnt_300*300.0 + cnt_200*200.0
+                         + cnt_100*100.0 + cnt_50*50.0)
+                        / (total * 300.0) * 100.0;
+                SDL_snprintf(buf, sizeof(buf), "Acc: %.2f%%   FPS: %d", acc, hud_fps);
                 SDL_RenderDebugText(renderer, (float)x, (float)y, buf);
 
                 SDL_SetRenderScale(renderer, 1.0f, 1.0f);
@@ -551,7 +568,7 @@ int main(int argc, char* argv[]) {
         Uint64 now = SDL_GetTicks();
         if (now - last_report >= 1000) {
             report_count++;
-            SDL_Log("FPS[%d]: %d  combo=%d max=%d 300=%d 100=%d 50=%d miss=%d", report_count, frames, combo, max_combo, cnt_300, cnt_100, cnt_50, cnt_miss);
+            SDL_Log("FPS[%d]: %d  combo=%d max=%d P=%d 300=%d 200=%d 100=%d 50=%d miss=%d", report_count, frames, combo, max_combo, cnt_perfect, cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss);
             hud_fps = frames;      // update HUD's FPS display once per second
             frames = 0;
             last_report = now;

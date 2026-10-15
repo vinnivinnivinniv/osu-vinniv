@@ -12,6 +12,7 @@ struct Note {
 
 struct Beatmap {
     int key_count = 0;
+    double od = 5.0;
     double bpm = 0.0;
     std::string title;
     std::string artist;

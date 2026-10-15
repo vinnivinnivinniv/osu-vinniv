@@ -76,6 +76,9 @@ bool parse_osu_file(const std::string& path, Beatmap& out) {
             if (k == "CircleSize") {
                 try { out.key_count = (int)std::stod(v); } catch (...) {}
             }
+            else if (k == "OverallDifficulty") {
+                try { out.od = std::stod(v); } catch (...) {}
+            }
         }
         else if (section == "HitObjects") {
             std::vector<std::string> parts;
