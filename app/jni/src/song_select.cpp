@@ -43,6 +43,7 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     e.version  = m.version;
     e.key_count = m.key_count;
     e.od        = m.od;
+    e.preview_time = m.preview_time;
 
     // Resolve audio path relative to the .osu folder
     std::string folder = osu_path;

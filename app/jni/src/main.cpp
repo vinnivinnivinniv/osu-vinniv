@@ -404,6 +404,37 @@ int main(int argc, char* argv[]) {
     float playfield_x = 0.0f;
     const float max_col_w  = 240.0f;
     float scroll_pps = 1.5f;   // recomputed in compute_geometry()
+
+    // ---- Timing-point accumulator (mirrors lazer SequentialScrollAlgorithm) ----
+    // raw_positions[i] = sum_{j<i} (t[j+1] - t[j]) * multiplier[j].
+    // rp(t) = raw_positions[i] + (t - t[i]) * multiplier[i], where i is the
+    // last timing point with t[i] <= t. Pixel offset is
+    //   (rp(note) - rp(now)) * judgement_y / time_range.
+    std::vector<double> raw_positions;
+
+    auto rebuild_timing_positions = [&]() {
+        raw_positions.clear();
+        const auto& tps = map.timing_points;
+        if (tps.empty()) return;
+        raw_positions.resize(tps.size());
+        raw_positions[0] = 0.0;
+        for (size_t i = 1; i < tps.size(); i++) {
+            raw_positions[i] = raw_positions[i-1]
+                             + (tps[i].time - tps[i-1].time) * tps[i-1].multiplier;
+        }
+    };
+
+    auto raw_position_at = [&](double t) -> double {
+        if (raw_positions.empty()) return t;
+        const auto& tps = map.timing_points;
+        int lo = 0, hi = (int)tps.size() - 1, best = 0;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (tps[mid].time <= t) { best = mid; lo = mid + 1; }
+            else                    { hi = mid - 1; }
+        }
+        return raw_positions[best] + (t - tps[best].time) * tps[best].multiplier;
+    };
     float judgement_y = 0.0f;
 
     auto compute_geometry = [&]() {
@@ -987,6 +1018,7 @@ int main(int argc, char* argv[]) {
                                 SDL_Log("SONGS: parse failed");
                             } else {
                                 map = new_map;
+                                rebuild_timing_positions();
 
                                 last_note_end = 0.0;
                                 for (const auto& n : map.notes) {
@@ -1463,7 +1495,9 @@ int main(int argc, char* argv[]) {
         // Visible time window depends on scroll speed. At low speeds a
         // note can be visible 10+ seconds ahead; at high speeds only a
         // fraction of a second.
-        double max_time_ahead = (judgement_y + 100.0) / scroll_pps;
+        double time_range = 11485.0 / (double)cfg_scroll_speed;
+        double rp_now     = raw_position_at(now_ms);
+        double max_time_ahead = time_range * 6.0;
 
         for (size_t ni = 0; ni < map.notes.size(); ni++) {
             const auto& n = map.notes[ni];
@@ -1479,7 +1513,8 @@ int main(int argc, char* argv[]) {
                 if (since_release > 250.0) continue;
             }
 
-            float y = judgement_y - (float)((n.time - now_ms) * scroll_pps);
+            double rp_note = raw_position_at(n.time);
+            float y = judgement_y - (float)((rp_note - rp_now) * judgement_y / time_range);
             float y_end = n.is_hold
                 ? judgement_y - (float)((n.end_time - now_ms) * scroll_pps)
                 : y;

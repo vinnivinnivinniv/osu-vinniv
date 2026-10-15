@@ -20,3 +20,6 @@ app/build/intermediates/
 .DS_Store
 Thumbs.db
 tests/test_parser
+
+*.bak
+*.bak[0-9]

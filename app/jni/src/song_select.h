@@ -13,6 +13,7 @@ struct SongEntry {
     std::string bg_path;     // absolute path to bg image (or "" if missing)
     int         key_count;
     double      od;
+    int         preview_time = -1;  // ms; -1 = unset
 };
 
 // Walk <root>/*/ and find every .osu file. Each becomes one entry.

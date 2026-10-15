@@ -18,6 +18,9 @@ static std::string trim(const std::string& s) {
 
 bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
     std::ifstream f(path);
+    // Timing-point state — persists across lines, updated as points are seen.
+    double tp_cur_beat_length = 500.0;   // default 120 BPM until first uninherited
+    double tp_cur_velocity    = 1.0;
     if (!f.is_open()) {
         SDL_Log("parse_osu_file: cannot open %s", path.c_str());
         return false;
@@ -53,6 +56,9 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
             std::string k = trim(t.substr(0, pos));
             std::string v = trim(t.substr(pos + 1));
             if (k == "AudioFilename") out.audio_file = v;
+            else if (k == "PreviewTime") {
+                try { out.preview_time = std::stoi(v); } catch (...) {}
+            }
             else if (k == "Mode") {
                 try { out.mode = std::stoi(v); } catch (...) {}
             }
@@ -75,15 +81,30 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
 
         else if (section == "TimingPoints") {
             // Format: time,beatLength,meter,sampleSet,sampleIndex,volume,uninherited,effects
-            // We only use the first uninherited point (beatLength > 0).
+            // beatLength > 0  -> uninherited (BPM change); resets SV velocity to 1.0
+            // beatLength < 0  -> inherited (SV change); SV = -100 / beatLength
             std::vector<std::string> parts;
             std::stringstream ss(t);
             std::string p;
             while (std::getline(ss, p, ',')) parts.push_back(p);
-            if (parts.size() >= 2 && out.bpm == 0.0) {
+            if (parts.size() >= 2) {
                 try {
+                    double tp_time  = std::stod(parts[0]);
                     double beat_len = std::stod(parts[1]);
-                    if (beat_len > 0.0) out.bpm = 60000.0 / beat_len;
+                    bool   uninherited = (beat_len > 0.0);
+                    if (uninherited) {
+                        if (out.bpm == 0.0) out.bpm = 60000.0 / beat_len;
+                        tp_cur_beat_length = beat_len;
+                        tp_cur_velocity    = 1.0;
+                    } else if (beat_len < 0.0) {
+                        tp_cur_velocity = -100.0 / beat_len;
+                    }
+                    TimingPoint tp;
+                    tp.time        = tp_time;
+                    tp.beat_length = tp_cur_beat_length;
+                    tp.uninherited = uninherited;
+                    tp.multiplier  = tp_cur_velocity * 1000.0 / tp_cur_beat_length;
+                    out.timing_points.push_back(tp);
                 } catch (...) {}
             }
         }
@@ -199,5 +220,65 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
     std::sort(out.notes.begin(), out.notes.end(),
               [](const Note& a, const Note& b) { return a.time < b.time; });
 
+    std::sort(out.timing_points.begin(), out.timing_points.end(),
+              [](const TimingPoint& a, const TimingPoint& b){ return a.time < b.time; });
+
+    // Lazer Beatmap.GetMostCommonBeatLength(). Used as BaseBeatLength when
+    // RelativeScaleBeatLengths is true (which mania sets). SliderMultiplier
+    // cancels out between DrawableScrollingRuleset and DrawableManiaRuleset.
+    // Algorithm: uninherited points only. Each owns the span to the next
+    // uninherited point (last one to the final hit object). First point is
+    // forced to t=0 (osu-stable compat). Group by beat_length, sum durations,
+    // take the largest.
+    {
+        double last_time = 0.0;
+        for (const auto& n : out.notes)
+            if (n.end_time > last_time) last_time = n.end_time;
+        if (last_time <= 0.0 && !out.timing_points.empty())
+            last_time = out.timing_points.back().time;
+
+        std::vector<const TimingPoint*> uninherited;
+        for (const auto& tp : out.timing_points)
+            if (tp.uninherited) uninherited.push_back(&tp);
+
+        if (!uninherited.empty()) {
+            struct Group { double beat_length; double duration; };
+            std::vector<Group> groups;
+            for (size_t i = 0; i < uninherited.size(); i++) {
+                const auto& tp = *uninherited[i];
+                if (tp.time > last_time) continue;
+                double cur  = (i == 0) ? 0.0 : tp.time;
+                double nxt  = (i + 1 == uninherited.size()) ? last_time
+                                                            : uninherited[i+1]->time;
+                double dur  = nxt - cur;
+                if (dur < 0.0) dur = 0.0;
+                double bl = std::round(tp.beat_length * 1000.0) / 1000.0;
+                bool found = false;
+                for (auto& g : groups) {
+                    if (std::abs(g.beat_length - bl) < 1e-6) {
+                        g.duration += dur;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) groups.push_back({bl, dur});
+            }
+            double best_bl = 500.0, best_dur = -1.0;
+            for (const auto& g : groups) {
+                if (g.duration > best_dur) {
+                    best_dur = g.duration;
+                    best_bl  = g.beat_length;
+                }
+            }
+            out.base_beat_length = best_bl;
+        }
+
+        // Recompute multipliers relative to base_beat_length. Old formula
+        // baked in 1000.0; recover velocity, then re-apply against base.
+        for (auto& tp : out.timing_points) {
+            double velocity = tp.multiplier * tp.beat_length / 1000.0;
+            tp.multiplier = velocity * out.base_beat_length / tp.beat_length;
+        }
+    }
     return true;
 }
