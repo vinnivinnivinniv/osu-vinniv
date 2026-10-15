@@ -21,7 +21,11 @@ struct SongEntry {
 
 // Walk <root>/*/ and find every .osu file. Each becomes one entry.
 // Reads metadata only — no [HitObjects] parsing.
-std::vector<SongEntry> scan_songs(const std::string& root);
+// If progress/total are non-null, a pre-pass counts .osu files and stores
+// the value in *total, then *progress is incremented after each read_meta.
+std::vector<SongEntry> scan_songs(const std::string& root,
+                                  std::atomic<int>* progress = nullptr,
+                                  std::atomic<int>* total    = nullptr);
 
 // Async scan. start() spawns a worker that (a) imports all .osz from
 // inbox_root, then (b) runs scan_songs(songs_root). Main thread polls
@@ -41,6 +45,11 @@ struct SongScanState {
     bool try_consume(std::vector<SongEntry>& out);
 
     bool complete() const { return complete_flag.load(); }
+
+    // Live progress for the UI. total == 0 means "not yet known"
+    // (pre-pass running, or cache hit).
+    std::atomic<int> progress{0};
+    std::atomic<int> total{0};
 
     void shutdown();
 

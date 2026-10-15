@@ -121,7 +121,11 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     return true;
 }
 
-std::vector<SongEntry> scan_songs(const std::string& root) {
+std::vector<SongEntry> scan_songs(const std::string& root,
+                                  std::atomic<int>* progress,
+                                  std::atomic<int>* total) {
+    if (progress) progress->store(0);
+    if (total)    total->store(0);
     // Cache lives next to the songs dir, in files/cache/
     std::string cache_path = root;
     {
@@ -145,6 +149,32 @@ std::vector<SongEntry> scan_songs(const std::string& root) {
     std::vector<SongEntry> out;
     DIR* d = opendir(root.c_str());
     if (!d) return out;
+
+    // Optional pre-pass: count .osu files so the UI can render a
+    // determinate progress bar. Directory I/O only — no parsing.
+    if (total) {
+        int c = 0;
+        DIR* cd = opendir(root.c_str());
+        if (cd) {
+            struct dirent* cde;
+            while ((cde = readdir(cd)) != nullptr) {
+                std::string n = cde->d_name;
+                if (n == "." || n == "..") continue;
+                std::string sd = join(root, n);
+                if (!is_dir(sd)) continue;
+                DIR* csd = opendir(sd.c_str());
+                if (!csd) continue;
+                struct dirent* csde;
+                while ((csde = readdir(csd)) != nullptr) {
+                    if (ends_with(csde->d_name, ".osu")) c++;
+                }
+                closedir(csd);
+            }
+            closedir(cd);
+        }
+        total->store(c);
+        SDL_Log("SCAN: pre-pass counted %d .osu files", c);
+    }
 
     int dir_count = 0;
     int file_count = 0;
@@ -174,6 +204,7 @@ std::vector<SongEntry> scan_songs(const std::string& root) {
             e.folder = set_dir;
             if (read_meta(osu_path, e))
                 out.push_back(e);
+            if (progress) progress->fetch_add(1);
         }
         closedir(sd);
     }
@@ -217,7 +248,7 @@ void SongScanState::start(const std::string& songs_root, const std::string& inbo
         Uint64 t0 = SDL_GetTicks();
         SDL_Log("SCAN: worker start");
         import_all_osz(inbox_root, songs_root);
-        auto entries = scan_songs(songs_root);
+        auto entries = scan_songs(songs_root, &progress, &total);
         size_t n = entries.size();
         {
             std::lock_guard<std::mutex> lk(mtx);
