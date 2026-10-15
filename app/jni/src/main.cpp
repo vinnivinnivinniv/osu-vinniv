@@ -10,12 +10,23 @@
 #include "osz_import.h"
 #include "audio_load.h"
 
-enum class AppState { SongSelect, Playing, Result };
+enum class AppState { SongSelect, Playing, Result, Settings };
 
 // Piecewise-linear OD interpolation. Anchor points are (od0, od5, od10).
 static double od_window(double od, double v0, double v5, double v10) {
     if (od < 5.0) return v0 + (od / 5.0) * (v5 - v0);
     return v5 + ((od - 5.0) / 5.0) * (v10 - v5);
+}
+
+// osu!mania scroll speed -> pixels per millisecond.
+// From osu source: timeRange = MAX_TIME_RANGE / speed, with speed 1.0-40.0.
+// The visible playfield height corresponds to that time range.
+static double osu_speed_to_scroll_pps(double speed, double visible_height_px) {
+    const double MAX_TIME_RANGE = 11485.0;
+    if (speed < 1.0)  speed = 1.0;
+    if (speed > 40.0) speed = 40.0;
+    double time_range = MAX_TIME_RANGE / speed;
+    return visible_height_px / time_range;
 }
 
 int main(int argc, char* argv[]) {
@@ -212,7 +223,7 @@ int main(int argc, char* argv[]) {
     float playfield_w = 0.0f;
     float playfield_x = 0.0f;
     const float max_col_w  = 240.0f;
-    const float scroll_pps = cfg_scroll_speed;
+    float scroll_pps = 1.5f;   // recomputed in compute_geometry()
     float judgement_y = 0.0f;
 
     auto compute_geometry = [&]() {
@@ -222,6 +233,10 @@ int main(int argc, char* argv[]) {
         playfield_w = col_w * keys;
         playfield_x = ((float)win_w - playfield_w) * 0.5f;
         judgement_y = win_h * 0.85f;
+
+        // osu scroll speed (1.0-40.0) -> pixels per millisecond
+        double visible_height = (double)judgement_y;
+        scroll_pps = (float)osu_speed_to_scroll_pps(cfg_scroll_speed, visible_height);
     };
     compute_geometry();
 
@@ -320,6 +335,11 @@ int main(int argc, char* argv[]) {
         scan_songs("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs");
     int   selected_index = 0;
     float song_scroll    = 0.0f;
+
+    // Settings state
+    bool  settings_dirty = false;   // re-apply audio gains when true
+    int   settings_row   = -1;      // which slider is being dragged, -1 = none
+    int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
     SDL_Log("SONGS: found %zu entries", songs.size());
 
     int report_count = 0;
@@ -497,6 +517,17 @@ int main(int argc, char* argv[]) {
                 const float row_h  = 110.0f;
                 const float list_y = 140.0f;
                 int hit = (int)((ty - list_y + song_scroll) / row_h);
+                // SETTINGS_BTN_DRAWN: top-right, inset for rounded corners
+                float tx = e.tfinger.x * (float)win_w;
+                const float settings_btn_x = (float)win_w - 320.0f;
+                const float settings_btn_y = 40.0f;
+                const float settings_btn_w = 260.0f;
+                const float settings_btn_h = 90.0f;
+                if (tx >= settings_btn_x && tx <= settings_btn_x + settings_btn_w &&
+                    ty >= settings_btn_y && ty <= settings_btn_y + settings_btn_h) {
+                    app_state = AppState::Settings;
+                    continue;
+                }
                 if (hit >= 0 && hit < (int)songs.size()) {
                     selected_index = hit;
                     const auto& s = songs[hit];
@@ -558,6 +589,73 @@ int main(int argc, char* argv[]) {
                             map.key_count, map.notes.size());
                 }
                 continue;
+            }
+            // SETTINGS TOUCH
+            if (app_state == AppState::Settings) {
+                if (e.type == SDL_EVENT_FINGER_DOWN) {
+                    float tx = e.tfinger.x * (float)win_w;
+                    float ty = e.tfinger.y * (float)win_h;
+
+                    // Back button (bottom-left, 300x100 logical area)
+                    if (tx < 300.0f && ty > (float)win_h - 150.0f) {
+                        app_state = AppState::SongSelect;
+                        continue;
+                    }
+
+                    // Slider rows
+                    const float row_x  = 80.0f;
+                    const float row_w  = (float)win_w - 160.0f;
+                    const float row_h  = 100.0f;
+                    const float row_y0 = 200.0f;
+                    const float gap    = 20.0f;
+
+                    for (int i = 0; i < 4; i++) {
+                        float ry = row_y0 + i * (row_h + gap);
+                        if (tx >= row_x && tx <= row_x + row_w &&
+                            ty >= ry && ty <= ry + row_h) {
+                            settings_row = i;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (e.type == SDL_EVENT_FINGER_MOTION && settings_row >= 0) {
+                    float tx = e.tfinger.x * (float)win_w;
+                    const float row_x = 80.0f;
+                    const float row_w = (float)win_w - 160.0f;
+                    float norm = (tx - row_x) / row_w;
+                    if (norm < 0.0f) norm = 0.0f;
+                    if (norm > 1.0f) norm = 1.0f;
+
+                    if      (settings_row == 0) cfg_music_vol    = norm * 1.0f;
+                    else if (settings_row == 1) cfg_hitsound_vol = norm * 2.0f;
+                    else if (settings_row == 2) cfg_scroll_speed = 1.0f + norm * 39.0f;
+                    else if (settings_row == 3) {
+                        int preset = (int)(norm * 4.0f);
+                        if      (preset == 0) cfg_fps_cap = 60;
+                        else if (preset == 1) cfg_fps_cap = 120;
+                        else if (preset == 2) cfg_fps_cap = 240;
+                        else                  cfg_fps_cap = 0;
+                    }
+                    settings_dirty = true;
+                    continue;
+                }
+                if (e.type == SDL_EVENT_FINGER_UP) {
+                    if (settings_row >= 0) {
+                        // Persist to settings.ini on release
+                        FILE* f = fopen("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini", "w");
+                        if (f) {
+                            fprintf(f, "music_volume=%.3f\n",    cfg_music_vol);
+                            fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
+                            fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
+                            fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
+                            fclose(f);
+                            SDL_Log("SETTINGS: saved");
+                        }
+                    }
+                    settings_row = -1;
+                    continue;
+                }
             }
             if (e.type == SDL_EVENT_FINGER_DOWN && paused) {
                 // Pause menu hit-test. Buttons laid out in draw block.
@@ -734,6 +832,18 @@ int main(int argc, char* argv[]) {
         if (paused || resuming)
             now_ms = (double)pause_started_tick - (double)audio_start_tick;
 
+        // Reapply audio gains if sliders moved
+        if (settings_dirty) {
+            settings_dirty = false;
+            if (audio_stream)         SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
+            if (hit_stream)           SDL_SetAudioStreamGain(hit_stream, cfg_hitsound_vol);
+            if (miss_stream)          SDL_SetAudioStreamGain(miss_stream, cfg_hitsound_vol);
+            if (clap_stream)          SDL_SetAudioStreamGain(clap_stream, cfg_hitsound_vol);
+            if (whistle_stream)       SDL_SetAudioStreamGain(whistle_stream, cfg_hitsound_vol);
+            if (finish_stream)        SDL_SetAudioStreamGain(finish_stream, cfg_hitsound_vol);
+            if (countdown_sfx_stream) SDL_SetAudioStreamGain(countdown_sfx_stream, cfg_hitsound_vol);
+        }
+
         // Result screen trigger: all notes done + 2 seconds grace
         if (!result_shown && !paused && !resuming &&
             !map.notes.empty() &&
@@ -811,10 +921,15 @@ int main(int argc, char* argv[]) {
         SDL_RenderLine(renderer, playfield_x, judgement_y, playfield_x + playfield_w, judgement_y);
 
         // Notes
+        // Visible time window depends on scroll speed. At low speeds a
+        // note can be visible 10+ seconds ahead; at high speeds only a
+        // fraction of a second.
+        double max_time_ahead = (judgement_y + 100.0) / scroll_pps;
+
         for (size_t ni = 0; ni < map.notes.size(); ni++) {
             const auto& n = map.notes[ni];
             if (note_judged[ni]) continue;
-            if (n.time > now_ms + 4000.0) break;   // notes sorted, stop early
+            if (n.time > now_ms + max_time_ahead) break;   // notes sorted, stop early
 
             // Render skip: resolved notes not marked ghost are gone.
             if (note_judged[ni] && !note_ghost[ni]) continue;
@@ -1048,6 +1163,99 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderScale(renderer, 1.0f, 1.0f);
         }
 
+        // ---- SETTINGS SCREEN ----
+        if (app_state == AppState::Settings) {
+            SDL_SetRenderDrawColor(renderer, 15, 15, 25, 255);
+            SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
+            SDL_RenderFillRect(renderer, &bg_full);
+
+            SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDebugText(renderer, 8.0f, 6.0f, "Settings");
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+            const float row_x     = 80.0f;
+            const float row_w     = (float)win_w - 160.0f;
+            const float row_h     = 100.0f;
+            const float row_y0    = 200.0f;
+            const float row_gap   = 20.0f;
+            const float label_gap = 12.0f;
+
+            // Rows: 0=music volume, 1=hitsound volume, 2=scroll speed, 3=fps cap
+            const char* labels[4] = {
+                "Music Volume",
+                "Hitsound Volume",
+                "Scroll Speed",
+                "FPS Cap"
+            };
+
+            float values[4] = {
+                cfg_music_vol,
+                cfg_hitsound_vol,
+                cfg_scroll_speed,
+                (float)cfg_fps_cap
+            };
+
+            for (int i = 0; i < 4; i++) {
+                float ry = row_y0 + i * (row_h + row_gap);
+
+                // Label
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                SDL_SetRenderDrawColor(renderer, 220, 220, 240, 255);
+                SDL_RenderDebugText(renderer, row_x/3.0f, (ry - 30.0f)/3.0f, labels[i]);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+                // Bar background
+                SDL_SetRenderDrawColor(renderer, 40, 45, 60, 255);
+                SDL_FRect bar = { row_x, ry, row_w, row_h };
+                SDL_RenderFillRect(renderer, &bar);
+
+                // Value fill
+                float fill = 0.0f;
+                if      (i == 0) fill = cfg_music_vol    / 1.0f;
+                else if (i == 1) fill = cfg_hitsound_vol / 2.0f;  // 0..2 range
+                else if (i == 2) fill = (cfg_scroll_speed - 1.0f) / 39.0f;  // 1.0..40.0
+                else if (i == 3) {
+                    int preset = 0;
+                    if      (cfg_fps_cap == 60)  preset = 0;
+                    else if (cfg_fps_cap == 120) preset = 1;
+                    else if (cfg_fps_cap == 240) preset = 2;
+                    else if (cfg_fps_cap == 0)   preset = 3;
+                    fill = (preset + 0.5f) / 4.0f;
+                }
+                if (fill < 0.0f) fill = 0.0f;
+                if (fill > 1.0f) fill = 1.0f;
+
+                SDL_SetRenderDrawColor(renderer, 90, 160, 240, 255);
+                SDL_FRect filled = { row_x, ry, row_w * fill, row_h };
+                SDL_RenderFillRect(renderer, &filled);
+
+                // Value text on the right side
+                char buf[64];
+                if      (i == 0) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_music_vol);
+                else if (i == 1) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_hitsound_vol);
+                else if (i == 2) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_scroll_speed);
+                else if (i == 3) {
+                    if      (cfg_fps_cap == 0)   SDL_snprintf(buf, sizeof(buf), "uncapped");
+                    else                          SDL_snprintf(buf, sizeof(buf), "%d", cfg_fps_cap);
+                }
+
+                SDL_SetRenderScale(renderer, 4.0f, 4.0f);
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                float tx = (row_x + row_w) / 4.0f - 8.0f * 8.0f;
+                float ty = ry / 4.0f + (row_h / 4.0f - 8.0f) * 0.5f;
+                SDL_RenderDebugText(renderer, tx, ty, buf);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
+
+            // Back button
+            SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+            SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
+            SDL_RenderDebugText(renderer, 8.0f,
+                (float)win_h/3.0f - 30.0f, "back");
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+        }
+
         // ---- Song select ----
         if (app_state == AppState::SongSelect) {
             // Full-screen dark bg
@@ -1059,7 +1267,30 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderScale(renderer, 3.0f, 3.0f);
             SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             SDL_RenderDebugText(renderer, 8.0f, 6.0f, "osu!vinniv - song select");
-            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+            // Settings button (top-right, drawn)
+            {
+                const float bx = (float)win_w - 320.0f;
+                const float by = 40.0f;
+                const float bw = 260.0f;
+                const float bh = 90.0f;
+
+                SDL_SetRenderDrawColor(renderer, 40, 50, 70, 255);
+                SDL_FRect bg = { bx, by, bw, bh };
+                SDL_RenderFillRect(renderer, &bg);
+
+                SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
+                SDL_RenderRect(renderer, &bg);
+
+                // Text centered — "settings" is 8 chars, at scale 3 each is 24px
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                SDL_SetRenderDrawColor(renderer, 220, 220, 140, 255);
+                float text_w_px = 8.0f * 24.0f;
+                float text_x = (bx + bw * 0.5f - text_w_px * 0.5f) / 3.0f;
+                float text_y = (by + bh * 0.5f - 12.0f) / 3.0f;
+                SDL_RenderDebugText(renderer, text_x, text_y, "settings");
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
 
             const float row_h  = 110.0f;
             const float list_x = 60.0f;
