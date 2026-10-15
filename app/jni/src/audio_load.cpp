@@ -29,7 +29,10 @@ bool load_audio_to_pcm(const char* path,
         SDL_AudioSpec spec = {};
         uint8_t* data = nullptr;
         uint32_t len = 0;
-        if (!SDL_LoadWAV(path, &spec, &data, &len)) return false;
+        if (!SDL_LoadWAV(path, &spec, &data, &len)) {
+            SDL_Log("AUDIO: WAV load failed for %s: %s", path, SDL_GetError());
+            return false;
+        }
         *out_spec = spec;
         *out_data = data;
         *out_len  = len;
@@ -41,7 +44,10 @@ bool load_audio_to_pcm(const char* path,
         drmp3_uint64 frame_count = 0;
         drmp3_int16* pcm = drmp3_open_file_and_read_pcm_frames_s16(
             path, &cfg, &frame_count, nullptr);
-        if (!pcm) return false;
+        if (!pcm) {
+            SDL_Log("AUDIO: MP3 decode failed for %s", path);
+            return false;
+        }
 
         SDL_AudioSpec spec = {};
         spec.format   = SDL_AUDIO_S16;
@@ -54,5 +60,6 @@ bool load_audio_to_pcm(const char* path,
         return true;
     }
 
+    SDL_Log("AUDIO: no extension match for %s", path);
     return false;
 }

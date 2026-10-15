@@ -1,10 +1,14 @@
 #include "song_select.h"
+#include <SDL3/SDL.h>
 #include "parser.h"
+#include "song_cache.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
 #include <algorithm>
 #include <fstream>
+#include <cstdlib>
+#include <ctime>
 
 static bool is_dir(const std::string& p) {
     struct stat st;
@@ -27,7 +31,11 @@ static std::string join(const std::string& a, const std::string& b) {
 // Uses the full parser but ignores HitObjects count.
 static bool read_meta(const std::string& osu_path, SongEntry& e) {
     Beatmap m;
-    if (!parse_osu_file(osu_path, m)) return false;
+    if (!parse_osu_file(osu_path, m, /* metadata_only = */ true)) return false;
+
+    // Only import native mania maps. Std/taiko/catch maps would need a
+    // real ruleset converter to play correctly.
+    if (m.mode != 3) return false;
 
     e.osu_path = osu_path;
     e.title    = m.title;
@@ -41,33 +49,70 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     auto slash = folder.find_last_of('/');
     if (slash != std::string::npos) folder = folder.substr(0, slash);
 
-    if (!m.audio_file.empty()) {
-        // Use whatever the .osu declares. Now that dr_mp3 handles mp3
-        // on Android, both .wav and .mp3 work.
-        std::string declared = join(folder, m.audio_file);
+    // Audio resolution — try declared filename first, then extensions
+    // we can decode. BeatmapExporter may rename audio during export
+    // (e.g. audio.ogg -> audio.mp3) while the .osu still declares the old name.
+    {
+        std::vector<std::string> candidates;
+        if (!m.audio_file.empty()) {
+            candidates.push_back(join(folder, m.audio_file));
 
-        // Sanity: if declared doesn't exist, try a .wav swap in case the
-        // original was converted at import time.
-        struct stat st;
-        if (stat(declared.c_str(), &st) == 0) {
-            e.audio_path = declared;
-        } else {
             auto dot = m.audio_file.find_last_of('.');
             std::string base = (dot != std::string::npos)
                              ? m.audio_file.substr(0, dot)
                              : m.audio_file;
-            e.audio_path = join(folder, base + ".wav");
+            candidates.push_back(join(folder, base + ".mp3"));
+            candidates.push_back(join(folder, base + ".wav"));
+            candidates.push_back(join(folder, base + ".ogg"));
         }
-    } else {
-        e.audio_path = join(folder, "audio.wav");
+        // Last-resort defaults
+        candidates.push_back(join(folder, "audio.mp3"));
+        candidates.push_back(join(folder, "audio.wav"));
+        candidates.push_back(join(folder, "audio.ogg"));
+
+        struct stat st;
+        for (const auto& c : candidates) {
+            if (stat(c.c_str(), &st) == 0) {
+                e.audio_path = c;
+                break;
+            }
+        }
+        if (e.audio_path.empty()) {
+            SDL_Log("SONGS: no audio found in %s (declared '%s')",
+                    folder.c_str(), m.audio_file.c_str());
+        }
     }
     return true;
 }
 
 std::vector<SongEntry> scan_songs(const std::string& root) {
+    // Cache lives next to the songs dir, in files/cache/
+    std::string cache_path = root;
+    {
+        auto pos = cache_path.find_last_of('/');
+        if (pos != std::string::npos) cache_path = cache_path.substr(0, pos);
+    }
+    cache_path += "/cache/songs.index";
+
+    // Validity: songs dir mtime must match what we stored.
+    struct stat root_stat;
+    time_t root_mtime = 0;
+    if (stat(root.c_str(), &root_stat) == 0) root_mtime = root_stat.st_mtime;
+
+    std::vector<SongEntry> cached;
+    if (load_song_cache(cache_path, root_mtime, cached)) {
+        SDL_Log("CACHE: loaded %zu entries", cached.size());
+        return cached;
+    }
+
+    SDL_Log("SCAN: start root=%s (cache miss)", root.c_str());
     std::vector<SongEntry> out;
     DIR* d = opendir(root.c_str());
     if (!d) return out;
+
+    int dir_count = 0;
+    int file_count = 0;
+    Uint64 t_start = SDL_GetTicks();
 
     struct dirent* de;
     while ((de = readdir(d)) != nullptr) {
@@ -81,10 +126,12 @@ std::vector<SongEntry> scan_songs(const std::string& root) {
         DIR* sd = opendir(set_dir.c_str());
         if (!sd) continue;
 
+        dir_count++;
         struct dirent* sde;
         while ((sde = readdir(sd)) != nullptr) {
             std::string fname = sde->d_name;
             if (!ends_with(fname, ".osu")) continue;
+            file_count++;
             std::string osu_path = join(set_dir, fname);
 
             SongEntry e;
@@ -95,6 +142,13 @@ std::vector<SongEntry> scan_songs(const std::string& root) {
         closedir(sd);
     }
     closedir(d);
+
+    Uint64 t_end = SDL_GetTicks();
+    SDL_Log("SCAN: walked %d dirs, %d osu files, %llu ms",
+            dir_count, file_count, (unsigned long long)(t_end - t_start));
+
+    save_song_cache(cache_path, root_mtime, out);
+    SDL_Log("CACHE: saved %zu entries", out.size());
 
     std::sort(out.begin(), out.end(), [](const SongEntry& a, const SongEntry& b) {
         if (a.artist != b.artist) return a.artist < b.artist;

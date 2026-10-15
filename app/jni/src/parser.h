@@ -12,6 +12,7 @@ struct Note {
 };
 
 struct Beatmap {
+    int mode = 0;   // 0=std, 1=taiko, 2=catch, 3=mania
     int key_count = 0;
     double od = 5.0;
     double bpm = 0.0;
@@ -22,4 +23,4 @@ struct Beatmap {
     std::vector<Note> notes;
 };
 
-bool parse_osu_file(const std::string& path, Beatmap& out);
+bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only = false);

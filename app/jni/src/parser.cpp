@@ -16,7 +16,7 @@ static std::string trim(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
-bool parse_osu_file(const std::string& path, Beatmap& out) {
+bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
     std::ifstream f(path);
     if (!f.is_open()) {
         SDL_Log("parse_osu_file: cannot open %s", path.c_str());
@@ -53,6 +53,9 @@ bool parse_osu_file(const std::string& path, Beatmap& out) {
             std::string k = trim(t.substr(0, pos));
             std::string v = trim(t.substr(pos + 1));
             if (k == "AudioFilename") out.audio_file = v;
+            else if (k == "Mode") {
+                try { out.mode = std::stoi(v); } catch (...) {}
+            }
         }
         else if (section == "Metadata") {
             auto pos = t.find(':');

@@ -9,6 +9,7 @@
 #include "song_select.h"
 #include "osz_import.h"
 #include "audio_load.h"
+#include "image_load.h"
 
 enum class AppState { SongSelect, Playing, Result, Settings };
 
@@ -342,6 +343,9 @@ int main(int argc, char* argv[]) {
 
     // Song select drag state
     SDL_FingerID song_drag_id      = (SDL_FingerID)-1;
+    bool         settings_btn_candidate = false;
+    float        settings_btn_start_x   = 0.0f;
+    float        settings_btn_start_y   = 0.0f;
     float        song_drag_start_y = 0.0f;
     float        song_drag_start_scroll = 0.0f;
     bool         song_drag_moved   = false;
@@ -351,6 +355,21 @@ int main(int argc, char* argv[]) {
     int   settings_row   = -1;      // which slider is being dragged, -1 = none
     int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
     SDL_Log("SONGS: found %zu entries", songs.size());
+
+    // IMAGE TEST — verify stb_image decode
+    {
+        int iw = 0, ih = 0;
+        uint8_t* px = nullptr;
+        const char* test_bg =
+            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/"
+            "2592336 Sasaki Sayaka - Kiss no Hitotsu de (Short Ver.) (andryzx)/bg.jpg";
+        if (load_image_rgba(test_bg, &iw, &ih, &px)) {
+            SDL_Log("IMAGE TEST: loaded %dx%d (%d bytes)", iw, ih, iw*ih*4);
+            free(px);
+        } else {
+            SDL_Log("IMAGE TEST: failed on %s", test_bg);
+        }
+    }
 
     int report_count = 0;
     bool   running  = true;
@@ -539,17 +558,24 @@ int main(int argc, char* argv[]) {
                     float tx = e.tfinger.x * (float)win_w;
                     float ty = e.tfinger.y * (float)win_h;
 
-                    // Settings button
+                    // Settings button — mark candidate, confirm on FINGER_UP
                     const float sbx = (float)win_w - 320.0f;
                     const float sby = 40.0f;
                     const float sbw = 260.0f;
                     const float sbh = 90.0f;
                     if (tx >= sbx && tx <= sbx + sbw &&
                         ty >= sby && ty <= sby + sbh) {
-                        app_state = AppState::Settings;
+                        settings_btn_candidate = true;
+                        settings_btn_start_x   = tx;
+                        settings_btn_start_y   = ty;
+                        song_drag_id           = e.tfinger.fingerID;
+                        song_drag_start_y      = ty;
+                        song_drag_start_scroll = song_scroll;
+                        song_drag_moved        = false;
                         continue;
                     }
 
+                    settings_btn_candidate = false;
                     song_drag_id           = e.tfinger.fingerID;
                     song_drag_start_y      = ty;
                     song_drag_start_scroll = song_scroll;
@@ -559,7 +585,15 @@ int main(int argc, char* argv[]) {
 
                 if (e.type == SDL_EVENT_FINGER_MOTION &&
                     e.tfinger.fingerID == song_drag_id) {
+                    float tx = e.tfinger.x * (float)win_w;
                     float ty = e.tfinger.y * (float)win_h;
+                    if (settings_btn_candidate) {
+                        float dx = tx - settings_btn_start_x;
+                        float dy = ty - settings_btn_start_y;
+                        if (dx * dx + dy * dy > 400.0f) {
+                            settings_btn_candidate = false;
+                        }
+                    }
                     float delta = ty - song_drag_start_y;
                     if (delta < -20.0f || delta > 20.0f) song_drag_moved = true;
                     float new_scroll = song_drag_start_scroll - delta;
@@ -571,6 +605,13 @@ int main(int argc, char* argv[]) {
 
                 if (e.type == SDL_EVENT_FINGER_UP &&
                     e.tfinger.fingerID == song_drag_id) {
+                    if (settings_btn_candidate && !song_drag_moved) {
+                        app_state = AppState::Settings;
+                        settings_btn_candidate = false;
+                        song_drag_id = (SDL_FingerID)-1;
+                        continue;
+                    }
+                    settings_btn_candidate = false;
                     if (!song_drag_moved) {
                         float ty = e.tfinger.y * (float)win_h;
                         int hit = (int)((ty - list_y + song_scroll) / row_h);
