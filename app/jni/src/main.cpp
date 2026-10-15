@@ -550,17 +550,22 @@ int main(int argc, char* argv[]) {
         double mh_win = std::floor(od_window(od, 151, 136, 121)) + 0.5;
         double ms_win = std::floor(od_window(od, 188, 173, 158)) + 0.5;
 
-        double best = 1e9; int best_i = -1;
+        // Find the EARLIEST unjudged note in this column. Do NOT skip
+        // forward past a note that's outside the miss window — a press
+        // when the earliest candidate is un-hittable is a no-op, matching
+        // lazer's DrawableNote.IsHittable (|now - note.time| <= miss_win).
+        // The earlier note gets auto-missed by the miss sweep below.
+        int best_i = -1;
         for (size_t i = 0; i < map.notes.size(); i++) {
             if (note_judged[i]) continue;
+            if (hold_started[i]) continue;
             if (map.notes[i].column != col) continue;
-            double d = map.notes[i].time - map_t;
-            if (d < -ms_win) continue;
-            if (d < best) { best = d; best_i = (int)i; }
-            if (d > ms_win) break;
+            best_i = (int)i;
+            break;
         }
         if (best_i < 0) return false;
-        double a = best < 0 ? -best : best;
+        double d = map.notes[best_i].time - map_t;
+        double a = d < 0 ? -d : d;
         if (a > ms_win) return false;
 
         // Note lock — if the next unjudged note in the same column has
@@ -668,7 +673,7 @@ int main(int argc, char* argv[]) {
     int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
     // Background image cache for song select (declared BEFORE the loader lambda)
     SDL_Texture* song_bg_tex   = nullptr;
-    std::string  song_bg_folder;
+    std::string  song_bg_key;   // songs[i].bg_path currently loaded
 
     PreviewPlayer    preview;
     std::string      preview_key;   // folder|preview_ms of current preview
@@ -765,7 +770,7 @@ int main(int argc, char* argv[]) {
             selected_index = 0;
             song_scroll = 0.0f;
             preview_key.clear();
-            song_bg_folder.clear();
+            song_bg_key.clear();
             SDL_Log("SCAN: consumed %zu entries", songs.size());
             for (int _i = 0; _i < 5 && _i < (int)songs.size(); _i++)
                 SDL_Log("SONG[%d]: artist='%s' title='%s' ver='%s'",
@@ -1355,13 +1360,13 @@ int main(int argc, char* argv[]) {
         // Keyed on folder so scrolling between difficulties doesn't reload.
         if (app_state == AppState::SongSelect &&
             !songs.empty() &&
-            songs[selected_index].folder != song_bg_folder) {
-            // Only cache the folder when a bg was actually found, otherwise
-            // subsequent songs would be skipped as if already loaded.
+            songs[selected_index].bg_path != song_bg_key) {
+            // Keyed on bg_path, not folder. Two difficulties in the same
+            // set can have different bg images (mappers do this).
             if (load_song_bg(selected_index))
-                song_bg_folder = songs[selected_index].folder;
+                song_bg_key = songs[selected_index].bg_path;
             else
-                song_bg_folder.clear();
+                song_bg_key.clear();
         }
         // Note: we deliberately DON'T free the bg when leaving song select —
         // gameplay uses the same texture. It gets replaced on the next song
@@ -1557,9 +1562,11 @@ int main(int argc, char* argv[]) {
 
             double rp_note = raw_position_at(n.time);
             float y = judgement_y - (float)((rp_note - rp_now) * judgement_y / time_range);
-            float y_end = n.is_hold
-                ? judgement_y - (float)((n.end_time - now_ms) * scroll_pps)
-                : y;
+            // Tail uses the same SV-aware accumulator as the head.
+            // Mixing formulas (old flat (end-now)*scroll_pps) made the tail
+            // drift by the accumulated multiplier difference on SV/BPM maps.
+            double rp_end = n.is_hold ? raw_position_at(n.end_time) : rp_note;
+            float y_end = judgement_y - (float)((rp_end - rp_now) * judgement_y / time_range);
 
             // Sticky head: while a hold is active, pin the head to the
             // judgement line and let the body shrink from the bottom.
@@ -1592,10 +1599,12 @@ int main(int argc, char* argv[]) {
                 SDL_FRect body = { x + 2.0f, top, w, bot - top };
                 SDL_RenderFillRect(renderer, &body);
 
-                // Tail cap — same color as head, drawn only if on screen.
+                // Tail cap — same anchor convention as head (centered on
+                // y_end, not bottom-aligned). Mixing the two put the tail
+                // 12px above the head whenever a hold spawned.
                 if (y_end > -50.0f && y_end < win_h + 50.0f) {
                     SDL_SetRenderDrawColor(renderer, cr, cg, cb, ca);
-                    SDL_FRect tail = { x + 2.0f, y_end - h, w, h };
+                    SDL_FRect tail = { x + 2.0f, y_end - h * 0.5f, w, h };
                     SDL_RenderFillRect(renderer, &tail);
                 }
             }
