@@ -42,9 +42,22 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     if (slash != std::string::npos) folder = folder.substr(0, slash);
 
     if (!m.audio_file.empty()) {
-        e.audio_path = join(folder, m.audio_file);
+        // Prefer .wav over the declared extension — SDL3 can't decode MP3,
+        // and we convert to wav during import.
+        std::string declared = join(folder, m.audio_file);
+        auto dot = m.audio_file.find_last_of('.');
+        std::string base = (dot != std::string::npos)
+                         ? m.audio_file.substr(0, dot)
+                         : m.audio_file;
+        std::string wav_path = join(folder, base + ".wav");
+
+        struct stat st;
+        if (stat(wav_path.c_str(), &st) == 0) {
+            e.audio_path = wav_path;
+        } else {
+            e.audio_path = declared;  // fall back to declared (may fail if mp3)
+        }
     } else {
-        // Fallback: look for audio.wav
         e.audio_path = join(folder, "audio.wav");
     }
     return true;

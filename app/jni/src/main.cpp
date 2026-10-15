@@ -6,6 +6,9 @@
 #include <fstream>
 #include <vector>
 #include "parser.h"
+#include "song_select.h"
+
+enum class AppState { SongSelect, Playing, Result };
 
 // Piecewise-linear OD interpolation. Anchor points are (od0, od5, od10).
 static double od_window(double od, double v0, double v5, double v10) {
@@ -201,15 +204,24 @@ int main(int argc, char* argv[]) {
 
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
 
-    // Playfield geometry (needed by both event loop and draw block)
-    const int   keys        = (map.key_count > 0) ? map.key_count : 4;
-    const float max_col_w   = 240.0f;
-    const float col_w_raw   = (float)win_w / keys;
-    const float col_w       = (col_w_raw > max_col_w) ? max_col_w : col_w_raw;
-    const float playfield_w = col_w * keys;
-    const float playfield_x = ((float)win_w - playfield_w) * 0.5f;
-    const float scroll_pps  = cfg_scroll_speed;
-    const float judgement_y = win_h * 0.85f;
+    // Playfield geometry (recomputed when song changes)
+    int   keys        = (map.key_count > 0) ? map.key_count : 4;
+    float col_w       = 0.0f;
+    float playfield_w = 0.0f;
+    float playfield_x = 0.0f;
+    const float max_col_w  = 240.0f;
+    const float scroll_pps = cfg_scroll_speed;
+    float judgement_y = 0.0f;
+
+    auto compute_geometry = [&]() {
+        keys        = (map.key_count > 0) ? map.key_count : 4;
+        float cwr   = (float)win_w / keys;
+        col_w       = (cwr > max_col_w) ? max_col_w : cwr;
+        playfield_w = col_w * keys;
+        playfield_x = ((float)win_w - playfield_w) * 0.5f;
+        judgement_y = win_h * 0.85f;
+    };
+    compute_geometry();
 
     // Judgment state
     std::vector<bool>   note_judged(map.notes.size(), false);
@@ -294,6 +306,14 @@ int main(int argc, char* argv[]) {
 
     Uint64 last_report = SDL_GetTicks();
     int frames = 0;
+    // ---- Song list + state machine ----
+    AppState app_state = AppState::SongSelect;
+    std::vector<SongEntry> songs =
+        scan_songs("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs");
+    int   selected_index = 0;
+    float song_scroll    = 0.0f;
+    SDL_Log("SONGS: found %zu entries", songs.size());
+
     int report_count = 0;
     bool   running  = true;
     bool   paused   = false;
@@ -345,7 +365,11 @@ int main(int argc, char* argv[]) {
             // BACK -> pause toggle (was quit; quit is in the menu now)
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 e.key.key == SDLK_AC_BACK) {
-                if (resuming) {
+                if (app_state == AppState::SongSelect) {
+                    running = false;   // exit from song select
+                } else if (app_state != AppState::Playing) {
+                    // no-op
+                } else if (resuming) {
                     resuming = false;
                     paused = true;
                     SDL_Log("PAUSE: canceled countdown (back)");
@@ -366,7 +390,9 @@ int main(int argc, char* argv[]) {
 
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 e.key.key == SDLK_ESCAPE && result_shown) {
-                running = false;
+                result_shown = false;
+                app_state = AppState::SongSelect;
+                SDL_Log("RESULT: back-to-select");
             }
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 (e.key.key == SDLK_R || e.key.key == SDLK_GRAVE) && result_shown) {
@@ -396,7 +422,9 @@ int main(int argc, char* argv[]) {
             }
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 e.key.key == SDLK_ESCAPE) {
-                if (resuming) {
+                if (app_state != AppState::Playing) {
+                    // no pause from song select
+                } else if (resuming) {
                     resuming = false;
                     paused = true;
                     SDL_Log("PAUSE: canceled countdown");
@@ -441,7 +469,7 @@ int main(int argc, char* argv[]) {
                 SDL_Log("RESTART: reset to t=0");
             }
 
-            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !paused && !resuming && !result_shown) {
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !paused && !resuming && !result_shown && app_state == AppState::Playing) {
                 int col = -1;
                 if      (e.key.key == SDLK_D) col = 0;
                 else if (e.key.key == SDLK_F) col = 1;
@@ -452,6 +480,76 @@ int main(int argc, char* argv[]) {
                     play_sound(hit_stream, hit_data, hit_len);
                     judge_col(col, (double)SDL_GetTicks());
                 }
+            }
+            // SONG SELECT TOUCH
+            if (e.type == SDL_EVENT_FINGER_DOWN &&
+                app_state == AppState::SongSelect && !songs.empty())
+            {
+                float ty = e.tfinger.y * (float)win_h;
+                const float row_h  = 110.0f;
+                const float list_y = 140.0f;
+                int hit = (int)((ty - list_y + song_scroll) / row_h);
+                if (hit >= 0 && hit < (int)songs.size()) {
+                    selected_index = hit;
+                    const auto& s = songs[hit];
+                    SDL_Log("SONGS: loading %s [%s]", s.title.c_str(), s.version.c_str());
+
+                    // Reset gameplay state
+                    std::fill(note_judged.begin(),  note_judged.end(),  false);
+                    std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
+                    std::fill(hold_active.begin(),  hold_active.end(),  false);
+                    std::fill(hold_started.begin(), hold_started.end(), false);
+                    std::fill(hold_broken.begin(),  hold_broken.end(),  false);
+                    std::fill(note_ghost.begin(),   note_ghost.end(),   false);
+                    std::fill(release_time.begin(), release_time.end(), 0.0);
+                    for (int j = 0; j < 16; j++) column_pressed[j] = false;
+                    active_holds.clear();
+                    active_fingers.clear();
+                    combo = 0; max_combo = 0;
+                    cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+                    cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+                    miss_cursor = 0;
+                    paused = false; resuming = false; result_shown = false;
+
+                    // Load new map
+                    Beatmap new_map;
+                    if (!parse_osu_file(s.osu_path, new_map)) {
+                        SDL_Log("SONGS: parse failed");
+                        continue;
+                    }
+                    map = new_map;
+
+                    // Resize state vectors for the new note count
+                    note_judged.assign(map.notes.size(),  false);
+                    note_hit_time.assign(map.notes.size(), -1.0);
+                    hold_active.assign(map.notes.size(),  false);
+                    hold_started.assign(map.notes.size(), false);
+                    hold_broken.assign(map.notes.size(),  false);
+                    note_ghost.assign(map.notes.size(),   false);
+                    release_time.assign(map.notes.size(), 0.0);
+
+                    // Load new audio
+                    if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
+                    if (wav_data)     { SDL_free(wav_data); wav_data = nullptr; }
+                    SDL_AudioSpec spec = {};
+                    if (SDL_LoadWAV(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
+                        audio_stream = SDL_OpenAudioDeviceStream(
+                            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+                        if (audio_stream)
+                            SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
+                        SDL_Log("SONGS: audio %s loaded", s.audio_path.c_str());
+                    } else {
+                        SDL_Log("SONGS: audio load failed: %s", SDL_GetError());
+                    }
+
+                    audio_queued = false;
+                    audio_start_tick = SDL_GetTicks() + 2000;
+                    compute_geometry();
+                    app_state = AppState::Playing;
+                    SDL_Log("SONGS: entering Playing (%dK, %zu notes)",
+                            map.key_count, map.notes.size());
+                }
+                continue;
             }
             if (e.type == SDL_EVENT_FINGER_DOWN && paused) {
                 // Pause menu hit-test. Buttons laid out in draw block.
@@ -493,9 +591,20 @@ int main(int argc, char* argv[]) {
                             paused = false;
                             SDL_Log("PAUSE: retry");
                         } else {
-                            // Quit
-                            running = false;
-                            SDL_Log("PAUSE: quit");
+                            // Return to song select
+                            if (audio_stream) {
+                                SDL_ClearAudioStream(audio_stream);
+                                SDL_PauseAudioStreamDevice(audio_stream);
+                            }
+                            audio_queued = false;
+                            paused = false;
+                            resuming = false;
+                            result_shown = false;
+                            for (int j = 0; j < 16; j++) column_pressed[j] = false;
+                            active_fingers.clear();
+                            active_holds.clear();
+                            app_state = AppState::SongSelect;
+                            SDL_Log("PAUSE: return-to-select");
                         }
                         break;
                     }
@@ -504,7 +613,7 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_EVENT_FINGER_DOWN && was_paused) {
                 continue;
             }
-            if (e.type == SDL_EVENT_FINGER_DOWN && !paused && !resuming && !result_shown) {
+            if (e.type == SDL_EVENT_FINGER_DOWN && !paused && !resuming && !result_shown && app_state == AppState::Playing) {
                 float tx = e.tfinger.x * (float)win_w;
                 int col = find_col(tx);
                 if (col >= 0) {
@@ -545,7 +654,7 @@ int main(int argc, char* argv[]) {
                 SDL_Log("RESULT: tap-retry");
                 continue;
             }
-            if ((e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) && !paused && !resuming) {
+            if ((e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) && !paused && !resuming && app_state == AppState::Playing) {
                 int release_col = -1;
                 for (size_t i = 0; i < active_fingers.size(); i++) {
                     if (active_fingers[i].id == e.tfinger.fingerID) {
@@ -580,7 +689,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !paused && !resuming && !result_shown) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !paused && !resuming && !result_shown && app_state == AppState::Playing) {
                 int col = find_col(e.button.x);
                 if (col >= 0) {
                     column_pressed[col] = true;
@@ -588,7 +697,7 @@ int main(int argc, char* argv[]) {
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
-            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && !paused && !resuming) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && !paused && !resuming && app_state == AppState::Playing) {
                 int col = find_col(e.button.x);
                 if (col >= 0) column_pressed[col] = false;
             }
@@ -604,6 +713,7 @@ int main(int argc, char* argv[]) {
 
         const Uint64 current_tick = SDL_GetTicks();
         if (!paused && !resuming && !audio_queued && audio_stream &&
+            app_state == AppState::Playing &&
             current_tick >= audio_start_tick) {
             if (SDL_PutAudioStreamData(audio_stream, wav_data, wav_len)) {
                 SDL_ResumeAudioStreamDevice(audio_stream);
@@ -641,7 +751,7 @@ int main(int argc, char* argv[]) {
         // Complete any holds whose tail has passed
         if (!paused) {
             double nmap = (double)SDL_GetTicks() - (double)audio_start_tick;
-            for (size_t i = 0; i < active_holds.size(); ) {
+            for (size_t i = 0; app_state == AppState::Playing && i < active_holds.size(); ) {
                 size_t hi = active_holds[i];
                 if (nmap > map.notes[hi].end_time) {
                     hold_active[hi]  = false;
@@ -652,7 +762,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        while (miss_cursor < map.notes.size() &&
+        while (app_state == AppState::Playing &&
+               miss_cursor < map.notes.size() &&
                map.notes[miss_cursor].time < now_ms - 70.0) {
             size_t i = miss_cursor;
             if (!note_judged[i] && !hold_started[i]) {
@@ -926,6 +1037,78 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
             SDL_RenderDebugText(renderer, px, py, "Tap / R to retry");
 
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+        }
+
+        // ---- Song select ----
+        if (app_state == AppState::SongSelect) {
+            // Full-screen dark bg
+            SDL_SetRenderDrawColor(renderer, 15, 15, 25, 255);
+            SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
+            SDL_RenderFillRect(renderer, &bg_full);
+
+            // Title bar
+            SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDebugText(renderer, 8.0f, 6.0f, "osu!vinniv - song select");
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+            const float row_h  = 110.0f;
+            const float list_x = 60.0f;
+            const float list_y = 140.0f;
+            const float list_w = (float)win_w - 120.0f;
+
+            if (songs.empty()) {
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                SDL_SetRenderDrawColor(renderer, 200, 120, 120, 255);
+                SDL_RenderDebugText(renderer, 12.0f, 60.0f,
+                    "no songs found - push .osu files to files/songs/");
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            } else {
+                int n = (int)songs.size();
+                if (selected_index < 0) selected_index = 0;
+                if (selected_index >= n) selected_index = n - 1;
+
+                for (int i = 0; i < n; i++) {
+                    float ry = list_y + i * row_h - song_scroll;
+                    if (ry + row_h < 0 || ry > (float)win_h) continue;
+
+                    bool sel = (i == selected_index);
+
+                    SDL_SetRenderDrawColor(renderer,
+                        sel ? 60 : 25, sel ? 80 : 30, sel ? 130 : 40, 255);
+                    SDL_FRect row = { list_x, ry, list_w, row_h - 6 };
+                    SDL_RenderFillRect(renderer, &row);
+
+                    if (sel) {
+                        SDL_SetRenderDrawColor(renderer, 200, 220, 255, 255);
+                        SDL_RenderRect(renderer, &row);
+                    }
+
+                    char line1[256];
+                    char line2[128];
+                    SDL_snprintf(line1, sizeof(line1), "%s - %s",
+                                 songs[i].artist.c_str(), songs[i].title.c_str());
+                    SDL_snprintf(line2, sizeof(line2), "[%s]  %dK  OD%.1f",
+                                 songs[i].version.c_str(),
+                                 songs[i].key_count, songs[i].od);
+
+                    SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                    SDL_RenderDebugText(renderer, list_x/3.0f + 8.0f,
+                                                 ry/3.0f + 6.0f, line1);
+                    SDL_SetRenderDrawColor(renderer, 180, 180, 200, 255);
+                    SDL_RenderDebugText(renderer, list_x/3.0f + 8.0f,
+                                                 ry/3.0f + 28.0f, line2);
+                    SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                }
+            }
+
+            // Footer hint
+            SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+            SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
+            SDL_RenderDebugText(renderer, 8.0f,
+                (float)win_h/3.0f - 20.0f, "tap a row to play");
             SDL_SetRenderScale(renderer, 1.0f, 1.0f);
         }
 
