@@ -258,6 +258,7 @@ int main(int argc, char* argv[]) {
     bool   running  = true;
     bool   paused   = false;
     bool   resuming = false;
+    bool   result_shown = false;
     Uint64 pause_started_tick = 0;
     Uint64 resume_start_tick  = 0;
     const Uint64 RESUME_DELAY_MS = 3000;
@@ -324,6 +325,36 @@ int main(int argc, char* argv[]) {
             }
 
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+                e.key.key == SDLK_ESCAPE && result_shown) {
+                running = false;
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+                (e.key.key == SDLK_R || e.key.key == SDLK_GRAVE) && result_shown) {
+                // Retry from result
+                std::fill(note_judged.begin(),  note_judged.end(),  false);
+                std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
+                std::fill(hold_active.begin(),  hold_active.end(),  false);
+                std::fill(hold_started.begin(), hold_started.end(), false);
+                std::fill(hold_broken.begin(),  hold_broken.end(),  false);
+                std::fill(note_ghost.begin(),   note_ghost.end(),   false);
+                std::fill(release_time.begin(), release_time.end(), 0.0);
+                for (int j = 0; j < 16; j++) column_pressed[j] = false;
+                active_holds.clear();
+                active_fingers.clear();
+                combo = 0; max_combo = 0;
+                cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+                cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+                miss_cursor = 0;
+                if (audio_stream) {
+                    SDL_ClearAudioStream(audio_stream);
+                    SDL_PauseAudioStreamDevice(audio_stream);
+                }
+                audio_queued = false;
+                audio_start_tick = SDL_GetTicks() + 2000;
+                result_shown = false;
+                SDL_Log("RESULT: retry");
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 e.key.key == SDLK_ESCAPE) {
                 if (resuming) {
                     resuming = false;
@@ -370,7 +401,7 @@ int main(int argc, char* argv[]) {
                 SDL_Log("RESTART: reset to t=0");
             }
 
-            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !paused && !resuming) {
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !paused && !resuming && !result_shown) {
                 int col = -1;
                 if      (e.key.key == SDLK_D) col = 0;
                 else if (e.key.key == SDLK_F) col = 1;
@@ -433,7 +464,7 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_EVENT_FINGER_DOWN && was_paused) {
                 continue;
             }
-            if (e.type == SDL_EVENT_FINGER_DOWN && !paused && !resuming) {
+            if (e.type == SDL_EVENT_FINGER_DOWN && !paused && !resuming && !result_shown) {
                 float tx = e.tfinger.x * (float)win_w;
                 int col = find_col(tx);
                 if (col >= 0) {
@@ -447,6 +478,32 @@ int main(int argc, char* argv[]) {
                     play_sound(hit_stream, hit_data, hit_len);
                     judge_col(col, (double)SDL_GetTicks());
                 }
+            }
+            if (e.type == SDL_EVENT_FINGER_DOWN && result_shown) {
+                // Tap anywhere → retry
+                std::fill(note_judged.begin(),  note_judged.end(),  false);
+                std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
+                std::fill(hold_active.begin(),  hold_active.end(),  false);
+                std::fill(hold_started.begin(), hold_started.end(), false);
+                std::fill(hold_broken.begin(),  hold_broken.end(),  false);
+                std::fill(note_ghost.begin(),   note_ghost.end(),   false);
+                std::fill(release_time.begin(), release_time.end(), 0.0);
+                for (int j = 0; j < 16; j++) column_pressed[j] = false;
+                active_holds.clear();
+                active_fingers.clear();
+                combo = 0; max_combo = 0;
+                cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+                cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+                miss_cursor = 0;
+                if (audio_stream) {
+                    SDL_ClearAudioStream(audio_stream);
+                    SDL_PauseAudioStreamDevice(audio_stream);
+                }
+                audio_queued = false;
+                audio_start_tick = SDL_GetTicks() + 2000;
+                result_shown = false;
+                SDL_Log("RESULT: tap-retry");
+                continue;
             }
             if ((e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) && !paused && !resuming) {
                 int release_col = -1;
@@ -483,7 +540,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !paused && !resuming) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !paused && !resuming && !result_shown) {
                 int col = find_col(e.button.x);
                 if (col >= 0) {
                     column_pressed[col] = true;
@@ -518,6 +575,16 @@ int main(int argc, char* argv[]) {
         double now_ms = (double)current_tick - (double)audio_start_tick;
         if (paused || resuming)
             now_ms = (double)pause_started_tick - (double)audio_start_tick;
+
+        // Result screen trigger: all notes done + 2 seconds grace
+        if (!result_shown && !paused && !resuming &&
+            !map.notes.empty() &&
+            now_ms > map.notes.back().end_time + 2000.0)
+        {
+            result_shown = true;
+            if (audio_stream) SDL_PauseAudioStreamDevice(audio_stream);
+            SDL_Log("RESULT: entered");
+        }
 
         // Countdown finishing → actually resume
         if (resuming) {
@@ -750,6 +817,75 @@ int main(int argc, char* argv[]) {
             float tx = ((float)win_w / 12.0f - cw) * 0.5f;
             float ty = ((float)win_h / 12.0f - cw) * 0.5f;
             SDL_RenderDebugText(renderer, tx, ty, buf);
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+        }
+
+        // ---- RESULT SCREEN ----
+        if (result_shown) {
+            // Dim
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+            SDL_FRect full = { 0, 0, (float)win_w, (float)win_h };
+            SDL_RenderFillRect(renderer, &full);
+
+            // Score + accuracy
+            long total_judged = (long)(cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss);
+            long total_notes  = (long)map.notes.size();
+            double acc = 0.0;
+            if (total_judged > 0) {
+                acc = (cnt_perfect*300.0 + cnt_300*300.0 + cnt_200*200.0
+                     + cnt_100*100.0 + cnt_50*50.0)
+                    / (total_judged * 300.0) * 100.0;
+            }
+            long raw_score = (long)(cnt_perfect)*300*300 + (long)cnt_300*300*300
+                           + (long)cnt_200*200*200 + (long)cnt_100*100*100
+                           + (long)cnt_50*50*50;
+            long max_score = total_notes * 300 * 300;
+            long score = max_score > 0 ? (long)((double)raw_score / max_score * 1000000.0) : 0;
+
+            const char* rank = "D";
+            if      (acc >= 100.0) rank = "SS";
+            else if (acc >= 95.0)  rank = "S";
+            else if (acc >= 90.0)  rank = "A";
+            else if (acc >= 80.0)  rank = "B";
+            else if (acc >= 70.0)  rank = "C";
+
+            // Panel — 8 lines, 5x scale
+            const float scale = 5.0f;
+            const int   lh_log = 20;
+            SDL_SetRenderScale(renderer, scale, scale);
+
+            float panel_logical_w = 60;
+            float panel_logical_h = lh_log * 8;
+            float px = ((float)win_w / scale - panel_logical_w) * 0.5f;
+            float py = ((float)win_h / scale - panel_logical_h) * 0.5f;
+
+            char line[64];
+
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+
+            SDL_snprintf(line, sizeof(line), "Rank:  %s", rank);
+            SDL_RenderDebugText(renderer, px, py, line); py += lh_log;
+
+            SDL_snprintf(line, sizeof(line), "Score: %ld", score);
+            SDL_RenderDebugText(renderer, px, py, line); py += lh_log;
+
+            SDL_snprintf(line, sizeof(line), "Acc:   %.2f%%", acc);
+            SDL_RenderDebugText(renderer, px, py, line); py += lh_log;
+
+            SDL_snprintf(line, sizeof(line), "Max:   %d", max_combo);
+            SDL_RenderDebugText(renderer, px, py, line); py += lh_log;
+
+            SDL_snprintf(line, sizeof(line), "P:%d 300:%d 200:%d", cnt_perfect, cnt_300, cnt_200);
+            SDL_RenderDebugText(renderer, px, py, line); py += lh_log;
+
+            SDL_snprintf(line, sizeof(line), "100:%d 50:%d M:%d", cnt_100, cnt_50, cnt_miss);
+            SDL_RenderDebugText(renderer, px, py, line); py += lh_log;
+
+            py += lh_log / 2;
+            SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
+            SDL_RenderDebugText(renderer, px, py, "Tap / R to retry");
+
             SDL_SetRenderScale(renderer, 1.0f, 1.0f);
         }
 
