@@ -34,3 +34,15 @@
 
 ## Known bugs
 - None currently open
+
+## Std → Mania conversion (planned feature)
+Reference: ppy/osu ManiaBeatmapConverter.cs + Beatmaps/Patterns/Legacy/*
+- Key mods 4K–9K are ranked, 1K–3K and 10K are unranked.
+- Score multiplier: 0.90x (changed from 1.0x in Aug 2025, PR #30506).
+- Key mods only apply to converts, not native mania maps.
+- Converter is seeded from (DrainRate + CircleSize) * 20 +
+  (int)(OD * 41.2) + round(AR) — deterministic output.
+- Density computed over last 7 notes; drives column distribution.
+- Port targets: SliderPatternGenerator.cs, SpinnerPatternGenerator.cs,
+  and the base circle handler in the same folder.
+- Converted maps display 0.90x multiplier and use NK column count.
