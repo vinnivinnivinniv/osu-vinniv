@@ -1,6 +1,52 @@
 # osu!vinniv — known gaps & future work
 
+## Build & test
+
+```
+Build (Java + C++):   ./gradlew assembleDebug
+Clean native rebuild: ./gradlew clean :app:assembleDebug
+Native only:          ./gradlew :app:externalNativeBuildDebug
+Release (for perf):   ./gradlew assembleRelease
+Install:              adb install -r app/build/outputs/apk/debug/app-debug.apk
+Java SDK:             JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64  (JDK 21 breaks the build)
+```
+
+**Build succeeded != new code on device.** `assembleDebug` writes an APK
+on the host; the phone keeps whatever was installed last. Always
+`adb install -r` between build and test. Confirm the .so is newer than
+the source you edited:
+
+```
+ls -la --time-style=full-iso app/jni/src/main.cpp \
+    app/build/intermediates/cxx/Debug/*/obj/arm64-v8a/libmain.so
+```
+
+**Logcat capture pattern** (buffer rolls on fast device):
+
+```
+adb shell am force-stop sh.ppy.osuvinniv
+adb logcat -c
+(adb logcat > /tmp/startup.log &)
+sleep 1
+adb shell am start -n sh.ppy.osuvinniv/org.libsdl.app.SDLActivity
+sleep 5
+pkill -f 'adb logcat' 2>/dev/null
+grep 'SDL/APP' /tmp/startup.log
+```
+
+**Refresh-rate cap on the V29e:** drops to 60 Hz after ~2 min idle. Force with
+`adb shell settings put system peak_refresh_rate 120` and
+`adb shell settings put system min_refresh_rate 120`.
+
 ## Per-map hitsounds (parser + runtime)
+
+**Status: IMPLEMENTED.** `map_sample_bank.cpp` resolves per-map hitsounds
+from the song folder; `bundled_sounds.h` carries Argon defaults as OGG C
+arrays written on first launch. Remaining gap: custom bank files are not
+copied from `.osz` when the exporter renamed them.
+
+The rest of this section is the original problem statement, kept for context.
+
 Currently the client uses a fixed soft-bank hitsound palette:
 files/hit.wav, clap.wav, whistle.wav, finish.wav, miss.wav.
 Every map sounds the same regardless of what the author intended.
@@ -55,16 +101,54 @@ Implementation sketch:
   - base_scroll_pps continues to come from the user's scroll_speed
     setting (1.0-40.0 → time range formula).
 
+## Song preview (implemented d90687b)
+
+Selection-change preview streams via a dedicated worker thread. Main
+thread never blocks on decode. Architecture:
+
+- `audio_decode.{h,cpp}` - streaming open/seek/read over dr_mp3 and
+  stb_vorbis; WAV is one-shot (files are small). Interface:
+  `audio_decoder_open/seek/read/close`.
+- `preview_player.{h,cpp}` - `PreviewPlayer` owns a `std::thread`, an
+  `std::atomic<uint64_t>` generation counter, and a condvar. Main thread
+  only calls `request(path, preview_ms, gain)` / `stop()` / `set_gain()`;
+  it never touches the SDL_AudioStream directly.
+- Worker loop: wait for generation bump -> open decoder -> seek to
+  `preview_ms` (or 40% of track if `preview_ms < 0`, matching lazer's
+  `WorkingBeatmap.PrepareTrackForPreview`) -> stream 2048-frame chunks,
+  keeping ~1.5 s queued via `SDL_GetAudioStreamQueued` -> on EOF seek
+  back to `preview_frame` and continue -> on generation change, tear
+  down and pick up the newest request.
+- Cancellation: fast-scrolling 20 songs in 2 s just bumps the counter
+  20 times. The worker discards in-flight work each time it re-checks.
+  No thread churn, no stale audio.
+
+**Why not whole-file decode (the previous approach):**
+`stb_vorbis_decode_filename` on a 200 s OGG took **1434 ms** on a
+Snapdragon 695, synchronously on the main thread. Every selection change
+hitched for over a second. Lazer uses BASS, which streams; this is the
+small equivalent.
+
+`load_audio_to_pcm` in `audio_load.cpp` **stays** for gameplay. That path
+still needs the whole buffer because `now_ms` is derived from
+`SDL_GetAudioStreamQueued`, which assumes everything is queued up-front.
+Streaming gameplay audio is a separate, larger change (the clock model
+would need to become position-based, like lazer's
+`MasterGameplayClockContainer`).
+
+**Follow-ups worth doing later:**
+- Fade-in on preview start (lazer's `DuckMomentarily`, ~800 ms restore).
+  Currently preview slams on.
+- Bg image pre-decode. `stbi_load` on 2560x1440 JPEG is 40-80 ms
+  synchronous on the same selection-change path. Once the audio stall
+  was removed, this becomes the visible hitch.
+- Backpressure sleep is 20 ms. If underruns appear on a loaded device,
+  drop to 10 ms.
+
 ## High priority
-- **Variable BPM / SV support.** Currently the renderer uses one
-  scroll_pps for the whole map. Maps with BPM changes or SV (inherited
-  timing points) scroll incorrectly. Implementation:
-    1. Parser: store all [TimingPoints] as
-       `struct TimingPoint { double time; double beatLength; bool uninherited; double sv; }`
-    2. Render: for each note, find the active timing point at note.time,
-       compute the local scroll multiplier, apply to y.
-  Reference: `DrawableManiaRuleset.cs:RelativeScaleBeatLengths`,
-  `SequentialScrollAlgorithm.cs` in ppy/osu.
+- **Variable BPM / SV support.** See "Mapper-set scroll speed" above.
+- **Per-K key mapping.** See "Settings: per-K key mapping" below.
+  Unblocks 6K/7K keyboard. Defaults: `S D F Space J K L` for 7K.
 
 ## Asset types
 - **Map thumbnail** — small crop, for song select row preview
@@ -212,13 +296,46 @@ Upgrade path:
 - Custom hitsound banks per map (SampleSet / SampleIndex in .osu)
 - Std → mania converts
 
+## Lessons learned (read before your first patch)
+
+- **Build succeeded != installed.** `assembleDebug` writes an APK on the
+  host. The device keeps whatever was installed last. Always
+  `adb install -r` between build and test. This bit twice in one session.
+- **Never commit a patch you haven't built.** Brace imbalances and
+  declaration-order issues pass a text-diff review and fail the compiler
+  only when CMake actually reruns.
+- **Marker-anchored edits, not line indices.** Every off-by-one bug today
+  came from reasoning about line numbers from a printed snippet. Use
+  `src.count(marker) == N` assertions. The file shifts between patches;
+  markers don't.
+- **Verify every patch with grep on full context, not just the marker.**
+  The result-trigger fix shipped with its opening brace missing because
+  the post-patch `sed` dump showed only one line. Print the whole block.
+- **The `if (marker in src)` guard pattern is a trap.** If the marker
+  appears anywhere (including in a comment) the branch silently no-ops.
+  Use `src.count(marker) == expected_count`.
+- **Declare state variables at the top of `main()`**, before any lambda
+  captures them. `cfg_*`, `map_bank`, `last_miss_sound_tick`, and
+  `selected_index` all caused "undeclared identifier" errors when
+  placed later.
+
 ## Notes
 - **FPS cap change requires restart** for vsync to toggle. In-app change
   updates the software cap but leaves the SDL vsync state alone, because
   `SDL_SetRenderVSync(renderer, 1)` can block on Android.
 
 ## Known bugs
-- None currently open
+- None currently open.
+
+## Recently fixed
+- **Result-screen trigger** (f6ba3a7). Was firing on
+  `notes.back().end_time` (last *head*, not last *tail*) and was
+  missing `!paused` / `!resuming` guards. Now uses `last_note_end`
+  recomputed on map load and gates on `app_state == AppState::Playing`.
+- **Song preview streaming** (d90687b). Removed the 1434 ms main-thread
+  OGG decode that hitched every selection change.
+- **Cache v3** (f6ba3a7). `SongEntry.preview_time` added; readers reject
+  `v2` files so a stale index can't silently lose the field.
 
 ## Std → Mania conversion (planned feature)
 **Status:** std maps stay on disk. Song select filters them out with
