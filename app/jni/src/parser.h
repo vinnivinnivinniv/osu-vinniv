@@ -7,6 +7,7 @@ struct Note {
     int column;       // 0..key_count-1
     double time;      // ms
     bool is_hold;
+    int  hit_sound;   // bitfield: 1=normal, 2=whistle, 4=finish, 8=clap
     double end_time;  // ms, equals time for taps
 };
 

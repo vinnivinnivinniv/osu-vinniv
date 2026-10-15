@@ -98,6 +98,10 @@ bool parse_osu_file(const std::string& path, Beatmap& out) {
                 n.is_hold = (type & 128) != 0;
                 n.end_time = n.time;
                 n.column = raw_x;
+                if (parts.size() >= 5)
+                    n.hit_sound = std::stoi(parts[4]);
+                else
+                    n.hit_sound = 0;
             } catch (...) { continue; }
 
             if (n.is_hold && parts.size() >= 6) {

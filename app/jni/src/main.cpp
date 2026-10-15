@@ -146,6 +146,39 @@ int main(int argc, char* argv[]) {
         SDL_Log("MISS: load failed: %s", SDL_GetError());
     }
 
+    SDL_AudioStream* clap_stream    = nullptr;
+    Uint8*           clap_data      = nullptr;
+    Uint32           clap_len       = 0;
+    SDL_AudioStream* whistle_stream = nullptr;
+    Uint8*           whistle_data   = nullptr;
+    Uint32           whistle_len    = 0;
+    SDL_AudioStream* finish_stream  = nullptr;
+    Uint8*           finish_data    = nullptr;
+    Uint32           finish_len     = 0;
+    {
+        struct Extra { SDL_AudioStream** s; Uint8** d; Uint32* l; const char* name; };
+        Extra extras[] = {
+            { &clap_stream,    &clap_data,    &clap_len,    "clap" },
+            { &whistle_stream, &whistle_data, &whistle_len, "whistle" },
+            { &finish_stream,  &finish_data,  &finish_len,  "finish" },
+        };
+        for (auto& e : extras) {
+            char path[128];
+            SDL_snprintf(path, sizeof(path),
+                "/sdcard/Android/data/sh.ppy.osuvinniv/files/%s.wav", e.name);
+            SDL_AudioSpec spec = {};
+            if (SDL_LoadWAV(path, &spec, e.d, e.l)) {
+                *e.s = SDL_OpenAudioDeviceStream(
+                    SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+                if (*e.s) {
+                    SDL_SetAudioStreamGain(*e.s, cfg_hitsound_vol);
+                    SDL_ResumeAudioStreamDevice(*e.s);
+                    SDL_Log("EXTRA: loaded %s", e.name);
+                }
+            }
+        }
+    }
+
     SDL_AudioSpec cd_spec = {};
     Uint8*  cd_data = nullptr;
     Uint32  cd_len  = 0;
@@ -233,6 +266,13 @@ int main(int argc, char* argv[]) {
         if (best_i < 0) return false;
         double a = best < 0 ? -best : best;
         if (a > ms_win) return false;
+
+        // Layered extras from the note's hitSound bitfield
+        int bits = map.notes[best_i].hit_sound;
+        if (clap_stream    && (bits & 8)) play_sound(clap_stream,    clap_data,    clap_len);
+        if (whistle_stream && (bits & 2)) play_sound(whistle_stream, whistle_data, whistle_len);
+        if (finish_stream  && (bits & 4)) play_sound(finish_stream,  finish_data,  finish_len);
+
         if (map.notes[best_i].is_hold) {
             hold_started[best_i] = true;
             hold_active[best_i]  = true;
@@ -952,6 +992,12 @@ int main(int argc, char* argv[]) {
     if (miss_data)    SDL_free(miss_data);
     if (countdown_sfx_stream) SDL_DestroyAudioStream(countdown_sfx_stream);
     if (cd_data)              SDL_free(cd_data);
+    if (clap_stream)    SDL_DestroyAudioStream(clap_stream);
+    if (clap_data)      SDL_free(clap_data);
+    if (whistle_stream) SDL_DestroyAudioStream(whistle_stream);
+    if (whistle_data)   SDL_free(whistle_data);
+    if (finish_stream)  SDL_DestroyAudioStream(finish_stream);
+    if (finish_data)    SDL_free(finish_data);
     if (hud_tex) SDL_DestroyTexture(hud_tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

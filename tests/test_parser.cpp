@@ -150,6 +150,38 @@ static void test_7k_mapping() {
     CHECK_EQ_I(m.notes[1].column, 6, "x=512 → col 6 (clamped)");
 }
 
+// ---------- test: hitsound bitfield ----------
+
+static void test_hitsound_bits() {
+    std::string s =
+        "osu file format v14\n"
+        "\n"
+        "[Difficulty]\n"
+        "CircleSize:4\n"
+        "OverallDifficulty:5\n"
+        "\n"
+        "[TimingPoints]\n"
+        "1000,500,4,2,0,100,1,0\n"
+        "\n"
+        "[HitObjects]\n"
+        "64,192,1000,1,0,0:0:0:0:\n"    // normal (0)
+        "192,192,1250,1,2,0:0:0:0:\n"    // whistle (2)
+        "320,192,1500,1,4,0:0:0:0:\n"    // finish (4)
+        "448,192,1750,1,8,0:0:0:0:\n"    // clap (8)
+        "64,192,2000,1,10,0:0:0:0:\n";   // whistle+clap
+
+    auto path = write_temp(s);
+    Beatmap m;
+    parse_osu_file(path, m);
+
+    CHECK_EQ_I(m.notes.size(), 5, "5 notes");
+    CHECK_EQ_I(m.notes[0].hit_sound, 0,  "no additions");
+    CHECK_EQ_I(m.notes[1].hit_sound, 2,  "whistle bit");
+    CHECK_EQ_I(m.notes[2].hit_sound, 4,  "finish bit");
+    CHECK_EQ_I(m.notes[3].hit_sound, 8,  "clap bit");
+    CHECK_EQ_I(m.notes[4].hit_sound, 10, "whistle+clap bits");
+}
+
 // ---------- test: unsorted input gets sorted ----------
 
 static void test_sorts_by_time() {
@@ -208,6 +240,7 @@ int main() {
     test_7k_mapping();
     test_sorts_by_time();
     test_utf8_bom();
+    test_hitsound_bits();
 
     std::printf("\n%d test(s) run, %d failed\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
