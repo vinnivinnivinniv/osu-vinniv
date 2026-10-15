@@ -44,6 +44,7 @@ int main(int argc, char* argv[]) {
     float cfg_hitsound_vol = 1.0f;
     float cfg_scroll_speed = 1.5f;
     int   cfg_fps_cap      = 120;   // 0 = uncapped
+    bool  vsync_enabled    = (cfg_fps_cap == 120);
     {
         std::ifstream sf("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini");
         std::string line;
@@ -80,8 +81,11 @@ int main(int argc, char* argv[]) {
     }
     // If fps_cap is 120 (matching panel rate), use vsync for accuracy.
     // Otherwise disable vsync and rely on the software cap below.
-    if (cfg_fps_cap == 120) SDL_SetRenderVSync(renderer, 1);
-    else                    SDL_SetRenderVSync(renderer, 0);
+    // vsync is only enabled when the FPS cap is 120. Runtime changes
+    // can disable it but never re-enable — SDL_SetRenderVSync(renderer, 1)
+    // blocks on Android and freezes the event loop.
+    if (vsync_enabled) SDL_SetRenderVSync(renderer, 1);
+    else               SDL_SetRenderVSync(renderer, 0);
 
     int win_w = 0, win_h = 0;
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
@@ -336,8 +340,14 @@ int main(int argc, char* argv[]) {
     int   selected_index = 0;
     float song_scroll    = 0.0f;
 
+    // Song select drag state
+    SDL_FingerID song_drag_id      = (SDL_FingerID)-1;
+    float        song_drag_start_y = 0.0f;
+    float        song_drag_start_scroll = 0.0f;
+    bool         song_drag_moved   = false;
+
     // Settings state
-    bool  settings_dirty = false;   // re-apply audio gains when true
+    bool  settings_dirty = false;
     int   settings_row   = -1;      // which slider is being dragged, -1 = none
     int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
     SDL_Log("SONGS: found %zu entries", songs.size());
@@ -393,7 +403,10 @@ int main(int argc, char* argv[]) {
             // BACK -> pause toggle (was quit; quit is in the menu now)
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 e.key.key == SDLK_AC_BACK) {
-                if (app_state == AppState::SongSelect) {
+                if (app_state == AppState::Settings) {
+                    app_state = AppState::SongSelect;
+                    SDL_Log("SETTINGS: back to song select");
+                } else if (app_state == AppState::SongSelect) {
                     running = false;   // exit from song select
                 } else if (app_state != AppState::Playing) {
                     // no-op
@@ -450,7 +463,10 @@ int main(int argc, char* argv[]) {
             }
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 e.key.key == SDLK_ESCAPE) {
-                if (app_state != AppState::Playing) {
+                if (app_state == AppState::Settings) {
+                    app_state = AppState::SongSelect;
+                    SDL_Log("SETTINGS: esc to song select");
+                } else if (app_state != AppState::Playing) {
                     // no pause from song select
                 } else if (resuming) {
                     resuming = false;
@@ -509,151 +525,114 @@ int main(int argc, char* argv[]) {
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
-            // SONG SELECT TOUCH
-            if (e.type == SDL_EVENT_FINGER_DOWN &&
-                app_state == AppState::SongSelect && !songs.empty())
-            {
-                float ty = e.tfinger.y * (float)win_h;
-                const float row_h  = 110.0f;
+            // SONG SELECT DRAG / TAP
+            if (app_state == AppState::SongSelect && !songs.empty()) {
+                const float list_x = 60.0f;
                 const float list_y = 140.0f;
-                int hit = (int)((ty - list_y + song_scroll) / row_h);
-                // SETTINGS_BTN_DRAWN: top-right, inset for rounded corners
-                float tx = e.tfinger.x * (float)win_w;
-                const float settings_btn_x = (float)win_w - 320.0f;
-                const float settings_btn_y = 40.0f;
-                const float settings_btn_w = 260.0f;
-                const float settings_btn_h = 90.0f;
-                if (tx >= settings_btn_x && tx <= settings_btn_x + settings_btn_w &&
-                    ty >= settings_btn_y && ty <= settings_btn_y + settings_btn_h) {
-                    app_state = AppState::Settings;
-                    continue;
-                }
-                if (hit >= 0 && hit < (int)songs.size()) {
-                    selected_index = hit;
-                    const auto& s = songs[hit];
-                    SDL_Log("SONGS: loading %s [%s]", s.title.c_str(), s.version.c_str());
+                const float row_h  = 110.0f;
+                const float footer_h = 120.0f;
+                const float list_h = (float)win_h - list_y - footer_h;
+                const float total_h = (float)songs.size() * row_h;
+                const float max_scroll = total_h > list_h ? total_h - list_h : 0.0f;
 
-                    // Reset gameplay state
-                    std::fill(note_judged.begin(),  note_judged.end(),  false);
-                    std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
-                    std::fill(hold_active.begin(),  hold_active.end(),  false);
-                    std::fill(hold_started.begin(), hold_started.end(), false);
-                    std::fill(hold_broken.begin(),  hold_broken.end(),  false);
-                    std::fill(note_ghost.begin(),   note_ghost.end(),   false);
-                    std::fill(release_time.begin(), release_time.end(), 0.0);
-                    for (int j = 0; j < 16; j++) column_pressed[j] = false;
-                    active_holds.clear();
-                    active_fingers.clear();
-                    combo = 0; max_combo = 0;
-                    cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
-                    cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
-                    miss_cursor = 0;
-                    paused = false; resuming = false; result_shown = false;
-
-                    // Load new map
-                    Beatmap new_map;
-                    if (!parse_osu_file(s.osu_path, new_map)) {
-                        SDL_Log("SONGS: parse failed");
-                        continue;
-                    }
-                    map = new_map;
-
-                    // Resize state vectors for the new note count
-                    note_judged.assign(map.notes.size(),  false);
-                    note_hit_time.assign(map.notes.size(), -1.0);
-                    hold_active.assign(map.notes.size(),  false);
-                    hold_started.assign(map.notes.size(), false);
-                    hold_broken.assign(map.notes.size(),  false);
-                    note_ghost.assign(map.notes.size(),   false);
-                    release_time.assign(map.notes.size(), 0.0);
-
-                    // Load new audio
-                    if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
-                    if (wav_data)     { SDL_free(wav_data); wav_data = nullptr; }
-                    SDL_AudioSpec spec = {};
-                    if (load_audio_to_pcm(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
-                        audio_stream = SDL_OpenAudioDeviceStream(
-                            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
-                        if (audio_stream)
-                            SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
-                        SDL_Log("SONGS: audio %s loaded", s.audio_path.c_str());
-                    } else {
-                        SDL_Log("SONGS: audio load failed: %s", SDL_GetError());
-                    }
-
-                    audio_queued = false;
-                    audio_start_tick = SDL_GetTicks() + 2000;
-                    compute_geometry();
-                    app_state = AppState::Playing;
-                    SDL_Log("SONGS: entering Playing (%dK, %zu notes)",
-                            map.key_count, map.notes.size());
-                }
-                continue;
-            }
-            // SETTINGS TOUCH
-            if (app_state == AppState::Settings) {
                 if (e.type == SDL_EVENT_FINGER_DOWN) {
                     float tx = e.tfinger.x * (float)win_w;
                     float ty = e.tfinger.y * (float)win_h;
 
-                    // Back button (bottom-left, 300x100 logical area)
-                    if (tx < 300.0f && ty > (float)win_h - 150.0f) {
-                        app_state = AppState::SongSelect;
+                    // Settings button
+                    const float sbx = (float)win_w - 320.0f;
+                    const float sby = 40.0f;
+                    const float sbw = 260.0f;
+                    const float sbh = 90.0f;
+                    if (tx >= sbx && tx <= sbx + sbw &&
+                        ty >= sby && ty <= sby + sbh) {
+                        app_state = AppState::Settings;
                         continue;
                     }
 
-                    // Slider rows
-                    const float row_x  = 80.0f;
-                    const float row_w  = (float)win_w - 160.0f;
-                    const float row_h  = 100.0f;
-                    const float row_y0 = 200.0f;
-                    const float gap    = 20.0f;
-
-                    for (int i = 0; i < 4; i++) {
-                        float ry = row_y0 + i * (row_h + gap);
-                        if (tx >= row_x && tx <= row_x + row_w &&
-                            ty >= ry && ty <= ry + row_h) {
-                            settings_row = i;
-                            break;
-                        }
-                    }
+                    song_drag_id           = e.tfinger.fingerID;
+                    song_drag_start_y      = ty;
+                    song_drag_start_scroll = song_scroll;
+                    song_drag_moved        = false;
                     continue;
                 }
-                if (e.type == SDL_EVENT_FINGER_MOTION && settings_row >= 0) {
-                    float tx = e.tfinger.x * (float)win_w;
-                    const float row_x = 80.0f;
-                    const float row_w = (float)win_w - 160.0f;
-                    float norm = (tx - row_x) / row_w;
-                    if (norm < 0.0f) norm = 0.0f;
-                    if (norm > 1.0f) norm = 1.0f;
 
-                    if      (settings_row == 0) cfg_music_vol    = norm * 1.0f;
-                    else if (settings_row == 1) cfg_hitsound_vol = norm * 2.0f;
-                    else if (settings_row == 2) cfg_scroll_speed = 1.0f + norm * 39.0f;
-                    else if (settings_row == 3) {
-                        int preset = (int)(norm * 4.0f);
-                        if      (preset == 0) cfg_fps_cap = 60;
-                        else if (preset == 1) cfg_fps_cap = 120;
-                        else if (preset == 2) cfg_fps_cap = 240;
-                        else                  cfg_fps_cap = 0;
-                    }
-                    settings_dirty = true;
+                if (e.type == SDL_EVENT_FINGER_MOTION &&
+                    e.tfinger.fingerID == song_drag_id) {
+                    float ty = e.tfinger.y * (float)win_h;
+                    float delta = ty - song_drag_start_y;
+                    if (delta < -20.0f || delta > 20.0f) song_drag_moved = true;
+                    float new_scroll = song_drag_start_scroll - delta;
+                    if (new_scroll < 0.0f) new_scroll = 0.0f;
+                    if (new_scroll > max_scroll) new_scroll = max_scroll;
+                    song_scroll = new_scroll;
                     continue;
                 }
-                if (e.type == SDL_EVENT_FINGER_UP) {
-                    if (settings_row >= 0) {
-                        // Persist to settings.ini on release
-                        FILE* f = fopen("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini", "w");
-                        if (f) {
-                            fprintf(f, "music_volume=%.3f\n",    cfg_music_vol);
-                            fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
-                            fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
-                            fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
-                            fclose(f);
-                            SDL_Log("SETTINGS: saved");
+
+                if (e.type == SDL_EVENT_FINGER_UP &&
+                    e.tfinger.fingerID == song_drag_id) {
+                    if (!song_drag_moved) {
+                        float ty = e.tfinger.y * (float)win_h;
+                        int hit = (int)((ty - list_y + song_scroll) / row_h);
+                        if (hit >= 0 && hit < (int)songs.size()) {
+                            selected_index = hit;
+                            const auto& s = songs[hit];
+                            SDL_Log("SONGS: loading %s [%s]",
+                                    s.title.c_str(), s.version.c_str());
+
+                            // Reset gameplay state
+                            std::fill(note_judged.begin(),  note_judged.end(),  false);
+                            std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
+                            std::fill(hold_active.begin(),  hold_active.end(),  false);
+                            std::fill(hold_started.begin(), hold_started.end(), false);
+                            std::fill(hold_broken.begin(),  hold_broken.end(),  false);
+                            std::fill(note_ghost.begin(),   note_ghost.end(),   false);
+                            std::fill(release_time.begin(), release_time.end(), 0.0);
+                            for (int j = 0; j < 16; j++) column_pressed[j] = false;
+                            active_holds.clear();
+                            active_fingers.clear();
+                            combo = 0; max_combo = 0;
+                            cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+                            cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+                            miss_cursor = 0;
+                            paused = false; resuming = false; result_shown = false;
+
+                            Beatmap new_map;
+                            if (!parse_osu_file(s.osu_path, new_map)) {
+                                SDL_Log("SONGS: parse failed");
+                            } else {
+                                map = new_map;
+                                note_judged.assign(map.notes.size(),  false);
+                                note_hit_time.assign(map.notes.size(), -1.0);
+                                hold_active.assign(map.notes.size(),  false);
+                                hold_started.assign(map.notes.size(), false);
+                                hold_broken.assign(map.notes.size(),  false);
+                                note_ghost.assign(map.notes.size(),   false);
+                                release_time.assign(map.notes.size(), 0.0);
+
+                                if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
+                                if (wav_data)     { SDL_free(wav_data); wav_data = nullptr; }
+                                SDL_AudioSpec spec = {};
+                                if (load_audio_to_pcm(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
+                                    audio_stream = SDL_OpenAudioDeviceStream(
+                                        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+                                    if (audio_stream)
+                                        SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
+                                    SDL_Log("SONGS: audio %s loaded", s.audio_path.c_str());
+                                } else {
+                                    SDL_Log("SONGS: audio load failed: %s", SDL_GetError());
+                                }
+
+                                audio_queued = false;
+                                audio_start_tick = SDL_GetTicks() + 2000;
+                                compute_geometry();
+                                app_state = AppState::Playing;
+                                SDL_Log("SONGS: entering Playing (%dK, %zu notes)",
+                                        map.key_count, map.notes.size());
+                            }
                         }
                     }
-                    settings_row = -1;
+                    song_drag_id = (SDL_FingerID)-1;
                     continue;
                 }
             }
@@ -1051,7 +1030,7 @@ int main(int argc, char* argv[]) {
         // Software cap only when vsync is off. With vsync on,
         // SDL_RenderPresent blocks until vblank; adding our own delay
         // would occasionally miss the next vblank and halve the rate.
-        if (cfg_fps_cap > 0 && cfg_fps_cap != 120) {
+        if (cfg_fps_cap > 0 && !vsync_enabled) {
             Uint64 frame_end_target = frame_start + (1000000ULL / cfg_fps_cap);
             Uint64 now_us = SDL_GetTicksNS() / 1000ULL;
             if (now_us < frame_end_target) {
@@ -1165,6 +1144,10 @@ int main(int argc, char* argv[]) {
 
         // ---- SETTINGS SCREEN ----
         if (app_state == AppState::Settings) {
+            static int settings_frame_count = 0;
+            settings_frame_count++;
+            if (settings_frame_count % 60 == 1)
+                SDL_Log("SETTINGS_RENDER: frame %d", settings_frame_count);
             SDL_SetRenderDrawColor(renderer, 15, 15, 25, 255);
             SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
             SDL_RenderFillRect(renderer, &bg_full);
@@ -1340,6 +1323,27 @@ int main(int argc, char* argv[]) {
                     SDL_RenderDebugText(renderer, list_x/3.0f + 8.0f,
                                                  ry/3.0f + 28.0f, line2);
                     SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                }
+
+                // SCROLLBAR — only show if content overflows
+                float footer_h = 120.0f;
+                float list_h   = (float)win_h - list_y - footer_h;
+                float total_h  = (float)n * row_h;
+                if (total_h > list_h) {
+                    float track_x = list_x + list_w + 8.0f;
+                    float track_w = 8.0f;
+                    float thumb_h = list_h * (list_h / total_h);
+                    float scroll_max = total_h - list_h;
+                    float thumb_y = list_y +
+                        (song_scroll / scroll_max) * (list_h - thumb_h);
+
+                    SDL_SetRenderDrawColor(renderer, 40, 40, 55, 255);
+                    SDL_FRect track = { track_x, list_y, track_w, list_h };
+                    SDL_RenderFillRect(renderer, &track);
+
+                    SDL_SetRenderDrawColor(renderer, 140, 160, 200, 255);
+                    SDL_FRect thumb = { track_x, thumb_y, track_w, thumb_h };
+                    SDL_RenderFillRect(renderer, &thumb);
                 }
             }
 
