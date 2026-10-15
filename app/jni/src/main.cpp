@@ -644,8 +644,6 @@ int main(int argc, char* argv[]) {
                     e.type == SDL_EVENT_FINGER_UP) {
                     stx = e.tfinger.x * (float)win_w;
                     sty = e.tfinger.y * (float)win_h;
-                    SDL_Log("SETTINGS: got type=%d x=%.0f y=%.0f row=%d",
-                            (int)e.type, stx, sty, settings_row);
                 }
 
                 if (e.type == SDL_EVENT_FINGER_DOWN) {
@@ -1241,10 +1239,6 @@ int main(int argc, char* argv[]) {
 
         // ---- SETTINGS SCREEN ----
         if (app_state == AppState::Settings) {
-            static int settings_frame_count = 0;
-            settings_frame_count++;
-            if (settings_frame_count % 60 == 1)
-                SDL_Log("SETTINGS_RENDER: frame %d", settings_frame_count);
             SDL_SetRenderDrawColor(renderer, 15, 15, 25, 255);
             SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
             SDL_RenderFillRect(renderer, &bg_full);
