@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <fstream>
 #include <vector>
@@ -145,6 +146,23 @@ int main(int argc, char* argv[]) {
         SDL_Log("MISS: load failed: %s", SDL_GetError());
     }
 
+    SDL_AudioSpec cd_spec = {};
+    Uint8*  cd_data = nullptr;
+    Uint32  cd_len  = 0;
+    SDL_AudioStream* countdown_sfx_stream = nullptr;
+    if (SDL_LoadWAV("/sdcard/Android/data/sh.ppy.osuvinniv/files/countdown.wav",
+                    &cd_spec, &cd_data, &cd_len)) {
+        countdown_sfx_stream = SDL_OpenAudioDeviceStream(
+            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &cd_spec, nullptr, nullptr);
+        if (countdown_sfx_stream) {
+            SDL_SetAudioStreamGain(countdown_sfx_stream, cfg_hitsound_vol);
+            SDL_ResumeAudioStreamDevice(countdown_sfx_stream);
+        }
+        SDL_Log("COUNTDOWN: loaded %d Hz, %u bytes", cd_spec.freq, cd_len);
+    } else {
+        SDL_Log("COUNTDOWN: load failed: %s", SDL_GetError());
+    }
+
     Uint64 audio_start_tick = SDL_GetTicks() + 2000;  // 2s lead-in
     bool audio_queued = false;
 
@@ -237,7 +255,12 @@ int main(int argc, char* argv[]) {
     Uint64 last_report = SDL_GetTicks();
     int frames = 0;
     int report_count = 0;
-    bool running = true;
+    bool   running  = true;
+    bool   paused   = false;
+    bool   resuming = false;
+    Uint64 pause_started_tick = 0;
+    Uint64 resume_start_tick  = 0;
+    const Uint64 RESUME_DELAY_MS = 3000;
 
 
 
@@ -261,20 +284,67 @@ int main(int argc, char* argv[]) {
     int  hud_last_fps = -1;
     bool hud_dirty = true;
 
+    // Pause menu button geometry
+    float menu_btn_x = 0.0f;
+    float menu_btn_w = 0.0f;
+    float menu_btn_h = 0.0f;
+    float menu_btn_y[3] = { 0.0f, 0.0f, 0.0f };
+
     while (running) {
         Uint64 frame_start = SDL_GetTicksNS() / 1000ULL;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            // Snapshot the pause state at event entry, since menu handlers
+            // can flip it mid-event.
+            bool was_paused = paused;
             if (e.type == SDL_EVENT_QUIT ||
                 e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                 running = false;
             }
-            if (e.type == SDL_EVENT_KEY_DOWN &&
+            // BACK -> pause toggle (was quit; quit is in the menu now)
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 e.key.key == SDLK_AC_BACK) {
-                running = false;
+                if (resuming) {
+                    resuming = false;
+                    paused = true;
+                    SDL_Log("PAUSE: canceled countdown (back)");
+                } else if (!paused) {
+                    paused = true;
+                    pause_started_tick = SDL_GetTicks();
+                    if (audio_stream) SDL_PauseAudioStreamDevice(audio_stream);
+                    for (int i = 0; i < 16; i++) column_pressed[i] = false;
+                    active_fingers.clear();
+                    SDL_Log("PAUSE: on (back)");
+                } else {
+                    paused = false;
+                    resuming = true;
+                    resume_start_tick = SDL_GetTicks();
+                    SDL_Log("RESUME: countdown 3s (back)");
+                }
+            }
+
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+                e.key.key == SDLK_ESCAPE) {
+                if (resuming) {
+                    resuming = false;
+                    paused = true;
+                    SDL_Log("PAUSE: canceled countdown");
+                } else if (!paused) {
+                    paused = true;
+                    pause_started_tick = SDL_GetTicks();
+                    if (audio_stream) SDL_PauseAudioStreamDevice(audio_stream);
+                    for (int i = 0; i < 16; i++) column_pressed[i] = false;
+                    active_fingers.clear();
+                    SDL_Log("PAUSE: on");
+                } else {
+                    paused = false;
+                    resuming = true;
+                    resume_start_tick = SDL_GetTicks();
+                    SDL_Log("RESUME: countdown 3s");
+                }
             }
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
-                e.key.key == SDLK_R) {
+                (e.key.key == SDLK_R || e.key.key == SDLK_GRAVE)) {
                 std::fill(note_judged.begin(),  note_judged.end(),  false);
                 std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
                 std::fill(hold_active.begin(),  hold_active.end(),  false);
@@ -300,7 +370,7 @@ int main(int argc, char* argv[]) {
                 SDL_Log("RESTART: reset to t=0");
             }
 
-            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !paused && !resuming) {
                 int col = -1;
                 if      (e.key.key == SDLK_D) col = 0;
                 else if (e.key.key == SDLK_F) col = 1;
@@ -312,7 +382,58 @@ int main(int argc, char* argv[]) {
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
-            if (e.type == SDL_EVENT_FINGER_DOWN) {
+            if (e.type == SDL_EVENT_FINGER_DOWN && paused) {
+                // Pause menu hit-test. Buttons laid out in draw block.
+                float tx = e.tfinger.x * (float)win_w;
+                float ty = e.tfinger.y * (float)win_h;
+                for (int i = 0; i < 3; i++) {
+                    if (tx >= menu_btn_x && tx <= menu_btn_x + menu_btn_w &&
+                        ty >= menu_btn_y[i] && ty <= menu_btn_y[i] + menu_btn_h) {
+                        if (i == 0) {
+                            // Continue — start countdown; actual resume happens when it ends
+                            paused = false;
+                            resuming = true;
+                            resume_start_tick = SDL_GetTicks();
+                            SDL_Log("RESUME: countdown 3s (continue)");
+                        } else if (i == 1) {
+                            // Retry — same as pressing R
+                            std::fill(note_judged.begin(),  note_judged.end(),  false);
+                            std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
+                            std::fill(hold_active.begin(),  hold_active.end(),  false);
+                            std::fill(hold_started.begin(), hold_started.end(), false);
+                            std::fill(hold_broken.begin(),  hold_broken.end(),  false);
+                            std::fill(note_ghost.begin(),   note_ghost.end(),   false);
+                            std::fill(release_time.begin(), release_time.end(), 0.0);
+                            for (int j = 0; j < 16; j++) column_pressed[j] = false;
+                            active_holds.clear();
+                            active_fingers.clear();
+                            combo = 0; max_combo = 0;
+                            cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+                            cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+                            miss_cursor = 0;
+                            if (audio_stream) {
+                                SDL_ClearAudioStream(audio_stream);
+                                SDL_PauseAudioStreamDevice(audio_stream);
+                            }
+                            if (hit_stream)  SDL_ClearAudioStream(hit_stream);
+                            if (miss_stream) SDL_ClearAudioStream(miss_stream);
+                            audio_queued = false;
+                            audio_start_tick = SDL_GetTicks() + 2000;
+                            paused = false;
+                            SDL_Log("PAUSE: retry");
+                        } else {
+                            // Quit
+                            running = false;
+                            SDL_Log("PAUSE: quit");
+                        }
+                        break;
+                    }
+                }
+            }
+            if (e.type == SDL_EVENT_FINGER_DOWN && was_paused) {
+                continue;
+            }
+            if (e.type == SDL_EVENT_FINGER_DOWN && !paused && !resuming) {
                 float tx = e.tfinger.x * (float)win_w;
                 int col = find_col(tx);
                 if (col >= 0) {
@@ -327,7 +448,7 @@ int main(int argc, char* argv[]) {
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
-            if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) {
+            if ((e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) && !paused && !resuming) {
                 int release_col = -1;
                 for (size_t i = 0; i < active_fingers.size(); i++) {
                     if (active_fingers[i].id == e.tfinger.fingerID) {
@@ -362,7 +483,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !paused && !resuming) {
                 int col = find_col(e.button.x);
                 if (col >= 0) {
                     column_pressed[col] = true;
@@ -370,7 +491,7 @@ int main(int argc, char* argv[]) {
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
-            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && !paused && !resuming) {
                 int col = find_col(e.button.x);
                 if (col >= 0) column_pressed[col] = false;
             }
@@ -385,7 +506,8 @@ int main(int argc, char* argv[]) {
         SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
 
         const Uint64 current_tick = SDL_GetTicks();
-        if (!audio_queued && audio_stream && current_tick >= audio_start_tick) {
+        if (!paused && !resuming && !audio_queued && audio_stream &&
+            current_tick >= audio_start_tick) {
             if (SDL_PutAudioStreamData(audio_stream, wav_data, wav_len)) {
                 SDL_ResumeAudioStreamDevice(audio_stream);
                 audio_queued = true;
@@ -393,11 +515,24 @@ int main(int argc, char* argv[]) {
             }
         }
         // Signed: negative during lead-in, positive during play
-        const double now_ms = (double)current_tick - (double)audio_start_tick;
+        double now_ms = (double)current_tick - (double)audio_start_tick;
+        if (paused || resuming)
+            now_ms = (double)pause_started_tick - (double)audio_start_tick;
+
+        // Countdown finishing → actually resume
+        if (resuming) {
+            if (SDL_GetTicks() - resume_start_tick >= RESUME_DELAY_MS) {
+                audio_start_tick += (SDL_GetTicks() - pause_started_tick);
+                if (audio_stream && audio_queued)
+                    SDL_ResumeAudioStreamDevice(audio_stream);
+                resuming = false;
+                SDL_Log("RESUME: go");
+            }
+        }
 
         // Background
         // Complete any holds whose tail has passed
-        {
+        if (!paused) {
             double nmap = (double)SDL_GetTicks() - (double)audio_start_tick;
             for (size_t i = 0; i < active_holds.size(); ) {
                 size_t hi = active_holds[i];
@@ -589,6 +724,75 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ---- Resume countdown ----
+        static int last_tick_second = -1;
+        if (resuming) {
+            Uint64 elapsed = SDL_GetTicks() - resume_start_tick;
+            int seconds_left = 3 - (int)(elapsed / 1000);
+            if (seconds_left < 1) seconds_left = 1;
+
+            // Fire countdown sfx when the second changes
+            if (seconds_left != last_tick_second) {
+                if (countdown_sfx_stream && cd_data) {
+                    SDL_ClearAudioStream(countdown_sfx_stream);
+                    SDL_PutAudioStreamData(countdown_sfx_stream, cd_data, (int)cd_len);
+                }
+                last_tick_second = seconds_left;
+            }
+
+            char buf[8];
+            SDL_snprintf(buf, sizeof(buf), "%d", seconds_left);
+
+            // Big centered number
+            SDL_SetRenderScale(renderer, 12.0f, 12.0f);
+            SDL_SetRenderDrawColor(renderer, 255, 255, 200, 255);
+            float cw = (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE;
+            float tx = ((float)win_w / 12.0f - cw) * 0.5f;
+            float ty = ((float)win_h / 12.0f - cw) * 0.5f;
+            SDL_RenderDebugText(renderer, tx, ty, buf);
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+        }
+
+        // ---- Pause menu ----
+        if (paused) {
+            // Dim the whole screen
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
+            SDL_FRect full = { 0, 0, (float)win_w, (float)win_h };
+            SDL_RenderFillRect(renderer, &full);
+
+            // Layout
+            menu_btn_w = 360.0f;
+            menu_btn_h = 72.0f;
+            menu_btn_x = ((float)win_w - menu_btn_w) * 0.5f;
+            float total_h = 3 * menu_btn_h + 2 * 24.0f;
+            float top_y   = ((float)win_h - total_h) * 0.5f;
+            menu_btn_y[0] = top_y;
+            menu_btn_y[1] = top_y + menu_btn_h + 24.0f;
+            menu_btn_y[2] = top_y + 2 * (menu_btn_h + 24.0f);
+
+            const char* labels[3] = { "Continue", "Retry", "Quit" };
+
+            for (int i = 0; i < 3; i++) {
+                // Button background
+                SDL_SetRenderDrawColor(renderer, 40, 40, 60, 240);
+                SDL_FRect bg = { menu_btn_x, menu_btn_y[i], menu_btn_w, menu_btn_h };
+                SDL_RenderFillRect(renderer, &bg);
+
+                // Border
+                SDL_SetRenderDrawColor(renderer, 200, 200, 220, 255);
+                SDL_RenderRect(renderer, &bg);
+
+                // Label centered — use hud font at 3x scale
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                float text_x = menu_btn_x / 3.0f + (menu_btn_w / 3.0f - (float)strlen(labels[i]) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) * 0.5f;
+                float text_y = menu_btn_y[i] / 3.0f + (menu_btn_h / 3.0f - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) * 0.5f;
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                SDL_RenderDebugText(renderer, text_x, text_y, labels[i]);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
+        }
+
         SDL_RenderPresent(renderer);
 
         frames++;
@@ -610,6 +814,8 @@ int main(int argc, char* argv[]) {
     if (hit_data)     SDL_free(hit_data);
     if (miss_stream)  SDL_DestroyAudioStream(miss_stream);
     if (miss_data)    SDL_free(miss_data);
+    if (countdown_sfx_stream) SDL_DestroyAudioStream(countdown_sfx_stream);
+    if (cd_data)              SDL_free(cd_data);
     if (hud_tex) SDL_DestroyTexture(hud_tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

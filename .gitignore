@@ -19,3 +19,4 @@ app/build/intermediates/
 # OS
 .DS_Store
 Thumbs.db
+tests/test_parser

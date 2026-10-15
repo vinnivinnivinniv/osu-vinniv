@@ -1,6 +1,9 @@
 #include "parser.h"
 
-#include <SDL3/SDL.h>
+// Forward-declared to avoid pulling in SDL in this translation unit.
+// Linker resolves against real SDL_Log on Android; tests stub it.
+extern "C" void SDL_Log(const char* fmt, ...);
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
