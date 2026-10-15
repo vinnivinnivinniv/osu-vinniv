@@ -1,5 +1,28 @@
 # osu!vinniv — known gaps & future work
 
+## Per-map hitsounds (parser + runtime)
+Currently the client uses a fixed soft-bank hitsound palette:
+files/hit.wav, clap.wav, whistle.wav, finish.wav, miss.wav.
+Every map sounds the same regardless of what the author intended.
+
+Real behavior: each hit object carries
+  field 4 = hitSound bitfield (1=normal, 2=whistle, 4=finish, 8=clap)
+  field 6 = hitSample descriptor "bank:name:suffix:volume:filename"
+The map's SampleSet (from [General] or [TimingPoints]) picks which bank
+(normal/soft/drum) to source from.
+
+Correct fix:
+1. Parser: also read field 6 to get the sample bank/suffix.
+2. At import: copy the .osz's hitsound files (soft-hitnormal.wav etc.)
+   into the song folder; they're already extracted by miniz.
+3. Runtime: play_sound picks per-note by combining bank + name.
+4. Fallback: if a specific bank file is missing, fall back to the
+   client default (current behaviour).
+
+Without this, hitsounds on any map that uses a custom bank will
+sound wrong. Most ranked maps use the default soft/normal banks, so
+impact is moderate until we support custom banks.
+
 ## High priority
 - **Variable BPM / SV support.** Currently the renderer uses one
   scroll_pps for the whole map. Maps with BPM changes or SV (inherited
