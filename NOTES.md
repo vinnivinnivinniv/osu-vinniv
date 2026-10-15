@@ -168,6 +168,21 @@ would need to become position-based, like lazer's
   star rating for sort order on converted entries. Mark them with a
   "(Convert)" tag in song select.
 
+## Cache version discipline
+
+`song_cache.cpp` writes `songs.index` keyed on the top-level songs dir
+mtime. Per-folder edits that don't bump that mtime aren't re-scanned.
+
+**Rule:** whenever parser or resolver behavior changes for a field that
+lands in `SongEntry`, bump the cache version (`v3` -> `v4`) in
+`song_cache.cpp`. Two sites: the reader's `compare(0, 2, "vN")` and the
+writer's `<< "vN "` line. Bumping forces a one-time rescan on first
+launch and every stale entry gets rebuilt.
+
+Made this mistake when adding PreviewTime (v2->v3, done right) and again
+just now: parser/resolver bg fixes did NOT bump, so Murumoo kept stale
+`bga.mp4` until a manual cache delete. Should have been v3 -> v4.
+
 ## Async song scan
 
 Cold-cache startup blocks the main thread for 5-10 s while 500+ `.osu`
