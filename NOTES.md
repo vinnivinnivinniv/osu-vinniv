@@ -23,6 +23,38 @@ Without this, hitsounds on any map that uses a custom bank will
 sound wrong. Most ranked maps use the default soft/normal banks, so
 impact is moderate until we support custom banks.
 
+## Mapper-set scroll speed (SV / BPM)
+Currently scroll_pps is constant for the whole map, from the user's
+global scroll_speed setting. Real behavior:
+
+1. **BPM changes** — the visible time range shrinks at higher BPM so
+   the density looks the same across the map. Lazer implements this as
+   `RelativeScaleBeatLengths = true` in DrawableManiaRuleset.
+   Effect: base_beat_length / current_beat_length multiplies the
+   scroll rate.
+
+2. **SV (inherited TimingPoints, field 7 == 0)** — mapper overrides
+   scroll rate per section. `MultiplierControlPoint.Velocity` is the
+   SV multiplier. Applied as a multiplier on top of BPM scaling.
+
+3. Both feed into `TimeRange.Value` per frame, which then drives the
+   y-position formula.
+
+Reference:
+  osu.Game.Rulesets.Mania/UI/DrawableManiaRuleset.cs
+  osu.Game/Rulesets/UI/Scrolling/Algorithms/SequentialScrollAlgorithm.cs
+  osu.Game/Rulesets/Timing/MultiplierControlPoint.cs
+
+Implementation sketch:
+  - Parser: store all [TimingPoints] as
+    `vector<TimingPoint>{ time, beatLength, uninherited, sv_multiplier }`
+  - Runtime: for note at time T, find the active timing point.
+    scroll_multiplier = (base_beat_length / active_beat_length) *
+                        active_sv_multiplier
+    local scroll_pps = base_scroll_pps * scroll_multiplier
+  - base_scroll_pps continues to come from the user's scroll_speed
+    setting (1.0-40.0 → time range formula).
+
 ## High priority
 - **Variable BPM / SV support.** Currently the renderer uses one
   scroll_pps for the whole map. Maps with BPM changes or SV (inherited
