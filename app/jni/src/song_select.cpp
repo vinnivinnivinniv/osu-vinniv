@@ -13,6 +13,8 @@
 #include <fstream>
 #include <cstdlib>
 #include <ctime>
+#include <cctype>
+#include <cstring>
 
 static bool is_dir(const std::string& p) {
     struct stat st;
@@ -82,18 +84,75 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
                 break;
             }
         }
-        // Background resolution — use the filename declared in [Events],
-        // falling back to well-known names.
+        // Background resolution. Some maps declare a video (mp4/webm)
+        // in [Events], either via Video,offset,"..." or as 0,0,"...".
+        // stbi cannot decode those, so skip video extensions and try
+        // extension variants of the declared filename plus known defaults.
         {
+            auto is_video = [](const std::string& s) -> bool {
+                auto dot = s.find_last_of('.');
+                if (dot == std::string::npos) return false;
+                std::string ext = s.substr(dot);
+                for (auto& c : ext) c = (char)::tolower(c);
+                return ext == ".mp4" || ext == ".webm" || ext == ".avi"
+                    || ext == ".flv" || ext == ".mov" || ext == ".mkv";
+            };
+            auto is_video_basename = [&](const std::string& s) -> bool {
+                std::string lc = s;
+                for (auto& c : lc) c = (char)::tolower(c);
+                return lc.rfind("bga.", 0) == 0
+                    || lc.rfind("video.", 0) == 0
+                    || lc.rfind("bgvideo.", 0) == 0;
+            };
+
             std::vector<std::string> bg_candidates;
-            if (!m.bg_file.empty()) bg_candidates.push_back(join(folder, m.bg_file));
+            if (!m.bg_file.empty() && !is_video(m.bg_file)) {
+                bg_candidates.push_back(join(folder, m.bg_file));
+                // Try same basename with common image extensions
+                auto dot = m.bg_file.find_last_of('.');
+                if (dot != std::string::npos) {
+                    std::string base = m.bg_file.substr(0, dot);
+                    for (const char* ext : {".jpg",".png",".jpeg",".JPG",".PNG"})
+                        bg_candidates.push_back(join(folder, base + ext));
+                }
+            }
             bg_candidates.push_back(join(folder, "bg.jpg"));
             bg_candidates.push_back(join(folder, "BG.jpg"));
             bg_candidates.push_back(join(folder, "bg.png"));
             bg_candidates.push_back(join(folder, "BG.png"));
+            bg_candidates.push_back(join(folder, "cover.jpg"));
+            bg_candidates.push_back(join(folder, "cover.png"));
+
             struct stat bst;
             for (const auto& c : bg_candidates) {
+                if (is_video(c)) continue;
+                if (is_video_basename(c.substr(c.find_last_of('/') + 1))) continue;
                 if (stat(c.c_str(), &bst) == 0) { e.bg_path = c; break; }
+            }
+
+            // Last-resort: scan the folder for any image file. Some mappers
+            // name the bg arbitrarily (e.g. "vi.jpg", "Myon.jpg") with no
+            // matching Events line we recognise. First match wins.
+            if (e.bg_path.empty()) {
+                auto has_ext = [](const std::string& s, const char* suf) -> bool {
+                    size_t sl = strlen(suf);
+                    if (s.size() < sl) return false;
+                    std::string tail = s.substr(s.size() - sl);
+                    for (auto& c : tail) c = (char)::tolower(c);
+                    return tail == suf;
+                };
+                DIR* bd = opendir(folder.c_str());
+                if (bd) {
+                    struct dirent* bde;
+                    while ((bde = readdir(bd)) != nullptr) {
+                        std::string n = bde->d_name;
+                        if (!has_ext(n, ".jpg") && !has_ext(n, ".png") &&
+                            !has_ext(n, ".jpeg")) continue;
+                        std::string c = join(folder, n);
+                        if (stat(c.c_str(), &bst) == 0) { e.bg_path = c; break; }
+                    }
+                    closedir(bd);
+                }
             }
         }
 

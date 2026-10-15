@@ -121,10 +121,19 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
             }
         }
         else if (section == "Events") {
-            // Background line format: 0,0,"filename.jpg",x,y
-            // We take the first one we see.
-            if (out.bg_file.empty()) {
-                // Find quoted filename
+            // Relevant event types:
+            //   0,0,"file.jpg",x,y       background image (first wins)
+            //   Video,offset,"file.mp4"  video (NOT a background)
+            //   2,start,end              break period
+            //   Sample,time,...          storyboard sample
+            //   Storyboard layers        ignored
+            //
+            // We only accept a bg from a line starting with '0,'. Without
+            // this guard, the first quoted string on the first Video,
+            // line would be stored as bg_file, and the actual background
+            // line further down would be skipped by the empty() check.
+            if (out.bg_file.empty() &&
+                t.size() >= 2 && t[0] == '0' && t[1] == ',') {
                 auto q1 = t.find('"');
                 if (q1 != std::string::npos) {
                     auto q2 = t.find('"', q1 + 1);
