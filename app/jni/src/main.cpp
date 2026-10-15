@@ -9,6 +9,7 @@
 #include "song_select.h"
 #include "osz_import.h"
 #include "audio_load.h"
+#include "preview_player.h"
 #include "image_load.h"
 #include "map_sample_bank.h"
 #include "bundled_sounds.h"
@@ -527,6 +528,9 @@ int main(int argc, char* argv[]) {
     SDL_Texture* song_bg_tex   = nullptr;
     std::string  song_bg_folder;
 
+    PreviewPlayer    preview;
+    std::string      preview_key;   // folder|preview_ms of current preview
+
     // Per-map hitsound bank (loaded when a song starts)
     int          song_bg_w     = 0;
     int          song_bg_h     = 0;
@@ -864,12 +868,6 @@ int main(int argc, char* argv[]) {
                                 for (const auto& n : map.notes) {
                                     if (n.end_time > last_note_end) last_note_end = n.end_time;
                                 }
-
-                                // Recompute end time for the new map
-                                last_note_end = 0.0;
-                                for (const auto& n : map.notes) {
-                                    if (n.end_time > last_note_end) last_note_end = n.end_time;
-                                }
                                 note_judged.assign(map.notes.size(),  false);
                                 note_hit_time.assign(map.notes.size(), -1.0);
                                 hold_active.assign(map.notes.size(),  false);
@@ -1195,6 +1193,20 @@ int main(int argc, char* argv[]) {
         // Note: we deliberately DON'T free the bg when leaving song select —
         // gameplay uses the same texture. It gets replaced on the next song
         // selection change or freed at app exit.
+
+        // ---- Song preview --------------------------------------------
+        if (app_state == AppState::SongSelect && !songs.empty()) {
+            const auto& sel = songs[selected_index];
+            std::string want_key = sel.folder + "|" + std::to_string(sel.preview_time);
+            if (want_key != preview_key) {
+                preview.request(sel.audio_path, sel.preview_time, cfg_music_vol);
+                preview_key = want_key;
+            }
+        } else if (!preview_key.empty()) {
+            preview.stop();
+            preview_key.clear();
+        }
+        // --------------------------------------------------------------
 
         const Uint64 current_tick = SDL_GetTicks();
         if (!paused && !resuming && !audio_queued && audio_stream &&

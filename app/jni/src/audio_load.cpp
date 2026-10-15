@@ -2,7 +2,6 @@
 
 #include <cstring>
 
-#define DR_MP3_IMPLEMENTATION
 #include "dr_mp3.h"
 
 // Declared in stb_vorbis.c (compiled as a separate translation unit)

@@ -17,6 +17,8 @@ add_library(main SHARED
     map_sample_bank.cpp
     osz_import.cpp
     audio_load.cpp
+    audio_decode.cpp
+    preview_player.cpp
     ${MINIZ_DIR}/miniz.c
     ${MINIZ_DIR}/miniz_tdef.c
     ${MINIZ_DIR}/miniz_tinfl.c
