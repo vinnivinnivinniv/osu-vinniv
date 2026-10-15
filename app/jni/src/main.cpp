@@ -624,13 +624,12 @@ int main(int argc, char* argv[]) {
     // ---- Song list + state machine ----
     AppState app_state = AppState::SongSelect;
 
-    // Auto-import any .osz files sitting in files/inbox/
-    import_all_osz(
-        "/sdcard/Android/data/sh.ppy.osuvinniv/files/inbox",
-        "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs");
-
-    std::vector<SongEntry> songs =
-        scan_songs("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs");
+    // Scan runs on a worker thread. Main thread shows "Scanning..." until
+    // the worker completes; see scan.try_consume() inside the frame loop.
+    std::vector<SongEntry> songs;
+    SongScanState scan;
+    scan.start("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs",
+               "/sdcard/Android/data/sh.ppy.osuvinniv/files/inbox");
 
     int   selected_index = 0;
     float song_scroll    = 0.0f;
@@ -745,6 +744,14 @@ int main(int argc, char* argv[]) {
 
 
     while (running) {
+        if (scan.try_consume(songs)) {
+            selected_index = 0;
+            song_scroll = 0.0f;
+            preview_key.clear();
+            song_bg_folder.clear();
+            SDL_Log("SCAN: consumed %zu entries", songs.size());
+        }
+
         Uint64 frame_start = SDL_GetTicksNS() / 1000ULL;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -1860,6 +1867,12 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             SDL_RenderDebugText(renderer, 8.0f, 6.0f, "osu!vinniv - song select");
 
+            if (!scan.complete()) {
+                SDL_SetRenderDrawColor(renderer, 220, 220, 240, 255);
+                SDL_RenderDebugText(renderer, (float)win_w / 6.0f - 48.0f,
+                                    (float)win_h / 6.0f, "Scanning...");
+            }
+
             // Settings button (top-right, drawn)
             {
                 const float bx = (float)win_w - 320.0f;
@@ -2036,6 +2049,7 @@ int main(int argc, char* argv[]) {
     if (hud_tex) SDL_DestroyTexture(hud_tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    scan.shutdown();
     SDL_Quit();
     return 0;
 }

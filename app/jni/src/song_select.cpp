@@ -2,6 +2,10 @@
 #include <SDL3/SDL.h>
 #include "parser.h"
 #include "song_cache.h"
+#include "osz_import.h"
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -201,4 +205,40 @@ std::vector<SongEntry> scan_songs(const std::string& root) {
         if (!dup) unique.push_back(e);
     }
     return unique;
+}
+
+// ---- SongScanState -------------------------------------------------------
+
+SongScanState::~SongScanState() { shutdown(); }
+
+void SongScanState::start(const std::string& songs_root, const std::string& inbox_root) {
+    if (worker.joinable()) return;
+    worker = std::thread([this, songs_root, inbox_root]() {
+        Uint64 t0 = SDL_GetTicks();
+        SDL_Log("SCAN: worker start");
+        import_all_osz(inbox_root, songs_root);
+        auto entries = scan_songs(songs_root);
+        size_t n = entries.size();
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            result = std::move(entries);
+        }
+        complete_flag.store(true);
+        SDL_Log("SCAN: worker done in %llu ms (%zu entries)",
+                (unsigned long long)(SDL_GetTicks() - t0), n);
+    });
+}
+
+bool SongScanState::try_consume(std::vector<SongEntry>& out) {
+    if (!complete_flag.load()) return false;
+    std::lock_guard<std::mutex> lk(mtx);
+    if (consumed) return false;
+    consumed = true;
+    out = std::move(result);
+    return true;
+}
+
+void SongScanState::shutdown() {
+    if (!worker.joinable()) return;
+    worker.join();
 }
