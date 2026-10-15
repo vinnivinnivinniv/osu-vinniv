@@ -161,6 +161,41 @@ osu.Game/Input/Bindings/*.cs
 - Offset adjustment section: Audio offset slider (ms), suggested offset
   from last play, "Apply suggested offset" button
 
+## Song list row format (lazer parity)
+Reference: lazer song select difficulty listing, captured 2026-10-16.
+
+Each difficulty row shows (left to right):
+  1. Star rating chip — colored pill with ★ and value, e.g. [★ 1.84]
+     Color ramps: 1.x = green, 2.x = blue-green, 3.x = teal,
+     4.x = yellow, 5.x = orange, 6.x = red. Follows lazer's
+     OsuColour.ForStarDifficulty() gradient.
+  2. "[NK] Difficulty name mapped by mapper"
+     - N = key count, K suffix. E.g. "[4K]", "[7K]".
+     - Difficulty name in lighter text.
+     - "mapped by <mapper>" in dimmed text after.
+  3. Mod icons row on the right (circular glyphs) — only if the
+     score for this difficulty was set with mods. Uses the mod's
+     IconSymbol. On our client: no mods yet, so skip.
+  4. RANKED badge — small colored chip, only on the set header row.
+
+Header row (top of a set) shows:
+  - Title in large white
+  - Artist in smaller dimmed text
+  - Ranked / Loved / Qualified / Graveyard badge
+
+Our current row format is:
+  Line 1: "Artist - Title"
+  Line 2: "[Version]  NK  ODxx"
+
+Upgrade path:
+  - Add star chip (draw circle + text inside via SDL_RenderDebugText,
+    or pre-render a small texture per star tier)
+  - Reformat line 2 to "[4K] Version mapped by mapper"
+  - Group rows by beatmap set: title/artist header once per set,
+    difficulty rows indented underneath. Requires a set-aware scan
+    (our `songs/` layout already groups by folder, so this is mostly
+    a rendering change).
+
 ## Medium priority
 - Result → song select (currently tap = retry; only Esc goes back)
 - On-screen restart button (R key works)
