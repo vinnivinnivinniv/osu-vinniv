@@ -99,6 +99,68 @@ Settings screen: keyboard capture mode or text entry.
 Reference: osu.Game.Rulesets.Mania/ManiaInputManager.cs,
 osu.Game/Input/Bindings/*.cs
 
+## UI reference (from real lazer, captured 2026-10-16)
+
+### Song select — details panel (selected beatmap)
+- Large bg image behind, dimmed
+- Card centered: osu! logo, title, artist
+- Mod icons row
+- Difficulty name + star rating chip
+- Source + Mapper text below
+- Right sidebar: Visual Settings (Background dim / Background blur sliders,
+  Storyboard/video toggle, Beatmap skins toggle, Beatmap colours toggle,
+  Combo colour normalisation slider)
+- Bottom: Audio Settings (Beatmap hitsounds toggle, Audio offset slider)
+- Bottom-left: big pink "Back" button
+- Warning banner top-left: "This beatmap contains scenes with rapidly
+  flashing colours" — epilepsy warning
+
+### Song select — listing (all difficulties)
+- Search bar top-right with magnifier icon
+- "N matches" count under search
+- Star Rating filter: dual-handle slider 0.0 to ∞
+- Toggles: "Show converts"
+- Dropdowns: Sort (Title), Group (None), Collection (All beatmaps)
+- Row per difficulty: [4K] Version mapped by mapper, star rating, mod icons
+- Selected row highlighted with vertical accent color
+- Bottom bar: Back | Mods | Random | Options buttons
+- osu! logo bottom-right corner
+- Settings icon top-left (grid)
+
+### Gameplay HUD
+- Score top-left in digital font, blue gradient background bar
+- Progress bar integrated into score widget
+- Accuracy top-right, percent format
+- PP counter top-right below accuracy
+- Leaderboard entry (#1 with avatar + player name) left-middle
+- Left/right side: vertical difficulty bar with tick markers
+- Bottom: song progress bar (thin line), elapsed time left, total time right
+- X button bottom-right (pause/exit)
+- MISS text centered above judgement line in red
+- Hold notes: gradient body, arrow glyphs on head/tail
+- Column backgrounds: colored vertical strips, one per key
+- Column hit lighting: bright flash on hit
+
+### Result screen
+- Circular rank ring, colored by rank (SSH=rainbow, SS/S=green, A=blue, B=orange, C=red, D=purple)
+- Rank letter centered inside ring
+- Full score (large) below
+- Mod icons row
+- Difficulty + mapper
+- 3-column stat block: ACCURACY | MAX COMBO | PP
+- Row of hit judgements: PERFECT | GREAT | GOOD | OK | MEH | MISS with counts
+- "Played on <date>" timestamp
+- Bottom bar: Back | Save replay | Retry | More options | Favorite
+
+### Settings screen (lazer parity)
+- Sidebar: General, Skin, Input, User Interface, Gameplay, osu!, osu!taiko,
+  osu!mania, Audio, Graphics, Online
+- Search bar top of content area
+- Volume sliders: Master, Master (window inactive), Effect, Music — all
+  slider with % label
+- Offset adjustment section: Audio offset slider (ms), suggested offset
+  from last play, "Apply suggested offset" button
+
 ## Medium priority
 - Result → song select (currently tap = retry; only Esc goes back)
 - On-screen restart button (R key works)
