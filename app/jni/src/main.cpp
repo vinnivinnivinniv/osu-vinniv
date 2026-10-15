@@ -636,6 +636,103 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
             }
+            // SETTINGS TOUCH
+            if (app_state == AppState::Settings) {
+                float stx = 0.0f, sty = 0.0f;
+                if (e.type == SDL_EVENT_FINGER_DOWN ||
+                    e.type == SDL_EVENT_FINGER_MOTION ||
+                    e.type == SDL_EVENT_FINGER_UP) {
+                    stx = e.tfinger.x * (float)win_w;
+                    sty = e.tfinger.y * (float)win_h;
+                    SDL_Log("SETTINGS: got type=%d x=%.0f y=%.0f row=%d",
+                            (int)e.type, stx, sty, settings_row);
+                }
+
+                if (e.type == SDL_EVENT_FINGER_DOWN) {
+                    // Back button (bottom-left region)
+                    if (stx < 400.0f && sty > (float)win_h - 200.0f) {
+                        app_state = AppState::SongSelect;
+                        SDL_Log("SETTINGS: back button");
+                        continue;
+                    }
+
+                    const float row_x  = 80.0f;
+                    const float row_w  = (float)win_w - 160.0f;
+                    const float row_h  = 100.0f;
+                    const float row_y0 = 200.0f;
+                    const float gap    = 20.0f;
+
+                    for (int i = 0; i < 4; i++) {
+                        float ry = row_y0 + i * (row_h + gap);
+                        if (stx >= row_x && stx <= row_x + row_w &&
+                            sty >= ry && sty <= ry + row_h) {
+                            settings_row = i;
+                            SDL_Log("SETTINGS: row %d selected", i);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                if (e.type == SDL_EVENT_FINGER_MOTION) {
+                    if (settings_row < 0) {
+                        const float row_x  = 80.0f;
+                        const float row_w  = (float)win_w - 160.0f;
+                        const float row_h  = 100.0f;
+                        const float row_y0 = 200.0f;
+                        const float gap    = 20.0f;
+                        for (int i = 0; i < 4; i++) {
+                            float ry = row_y0 + i * (row_h + gap);
+                            if (stx >= row_x && stx <= row_x + row_w &&
+                                sty >= ry && sty <= ry + row_h) {
+                                settings_row = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (settings_row >= 0) {
+                        const float row_x = 80.0f;
+                        const float row_w = (float)win_w - 160.0f;
+                        float norm = (stx - row_x) / row_w;
+                        if (norm < 0.0f) norm = 0.0f;
+                        if (norm > 1.0f) norm = 1.0f;
+
+                        if      (settings_row == 0) cfg_music_vol    = norm * 1.0f;
+                        else if (settings_row == 1) cfg_hitsound_vol = norm * 2.0f;
+                        else if (settings_row == 2) cfg_scroll_speed = 1.0f + norm * 39.0f;
+                        else if (settings_row == 3) {
+                            int preset = (int)(norm * 4.0f);
+                            if      (preset == 0) cfg_fps_cap = 60;
+                            else if (preset == 1) cfg_fps_cap = 120;
+                            else if (preset == 2) cfg_fps_cap = 240;
+                            else                  cfg_fps_cap = 0;
+                        }
+                        settings_dirty = true;
+                    }
+                    continue;
+                }
+
+                if (e.type == SDL_EVENT_FINGER_UP) {
+                    if (settings_row >= 0) {
+                        FILE* f = fopen("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini", "w");
+                        if (f) {
+                            fprintf(f, "music_volume=%.3f\n",    cfg_music_vol);
+                            fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
+                            fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
+                            fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
+                            fclose(f);
+                            SDL_Log("SETTINGS: saved");
+                        }
+                    }
+                    settings_row = -1;
+                    continue;
+                }
+
+                // Any other event while in settings is consumed
+                continue;
+            }
+
             if (e.type == SDL_EVENT_FINGER_DOWN && paused) {
                 // Pause menu hit-test. Buttons laid out in draw block.
                 float tx = e.tfinger.x * (float)win_w;
