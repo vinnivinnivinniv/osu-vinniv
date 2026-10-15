@@ -47,6 +47,38 @@ static double od_window(double od, double v0, double v5, double v10) {
     return v5 + ((od - 5.0) / 5.0) * (v10 - v5);
 }
 
+// Lazer-faithful scoring helpers.
+// Perfect = 305, Great = 300 (ManiaScoreProcessor.GetBaseScoreForResult override).
+static int lazer_base_score(int tier) {
+    // tier: 0=Perfect, 1=Great(300), 2=Good(200), 3=Ok(100), 4=Meh(50)
+    switch (tier) {
+        case 0: return 305;
+        case 1: return 300;
+        case 2: return 200;
+        case 3: return 100;
+        case 4: return 50;
+    }
+    return 0;
+}
+
+// Score formula from ManiaScoreProcessor.ComputeTotalScore.
+//   score = 150000 * comboProgress
+//         + 850000 * pow(acc, 2 + 2*acc) * accuracyProgress
+static long compute_lazer_score(int perfect, int great, int good, int ok, int meh,
+                                int total_notes) {
+    if (total_notes <= 0) return 0;
+    int judged = perfect + great + good + ok + meh;
+    double currentBase = perfect * 305.0 + great * 300.0
+                       + good * 200.0 + ok * 100.0 + meh * 50.0;
+    double maxBase = total_notes * 305.0;
+    double acc = maxBase > 0 ? currentBase / maxBase : 1.0;
+    double comboProgress    = (double)judged / total_notes;
+    double accuracyProgress = (double)judged / total_notes;
+    double score = 150000.0 * comboProgress
+                 + 850000.0 * std::pow(acc, 2.0 + 2.0 * acc) * accuracyProgress;
+    return (long)score;
+}
+
 // osu!mania scroll speed -> pixels per millisecond.
 // From osu source: timeRange = MAX_TIME_RANGE / speed, with speed 1.0-40.0.
 // The visible playfield height corresponds to that time range.
@@ -76,6 +108,7 @@ int main(int argc, char* argv[]) {
     float cfg_hitsound_vol = 1.0f;
     float cfg_scroll_speed = 1.5f;
     int   cfg_fps_cap      = 120;   // 0 = uncapped
+    double cfg_audio_offset_ms = 0.0;
     bool  vsync_enabled    = (cfg_fps_cap == 120);
     {
         std::ifstream sf("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini");
@@ -90,6 +123,7 @@ int main(int argc, char* argv[]) {
                 else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
                 else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
                 else if (k == "fps_cap")         cfg_fps_cap      = std::stoi(v);
+                else if (k == "audio_offset_ms") cfg_audio_offset_ms = std::stof(v);
             } catch (...) {}
         }
         SDL_Log("CFG: music=%.2f hit=%.2f scroll=%.2f",
@@ -264,6 +298,7 @@ int main(int argc, char* argv[]) {
     }
 
     Uint64 audio_start_tick = SDL_GetTicks() + 2000;  // 2s lead-in
+    double audio_drift_ms   = 0.0;   // smoothed drift between wall clock and audio position
     bool audio_queued = false;
 
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
@@ -312,6 +347,16 @@ int main(int argc, char* argv[]) {
     active_fingers.reserve(10);
 
     Uint64 last_miss_sound_tick = 0;   // miss-sound cooldown
+
+    // Latest end time across all notes — what actually determines "song done".
+    // notes.back() has the latest head time, not necessarily the latest tail.
+    double last_note_end = 0.0;
+    for (const auto& n : map.notes) {
+        if (n.end_time > last_note_end) last_note_end = n.end_time;
+    }
+
+    // OD-scaled miss window (matches lazer's HitWindows.miss_window)
+    double od_miss_window = std::floor(od_window(map.od, 188.0, 173.0, 158.0)) + 0.5;
 
     auto play_miss_sound = [&]() {
         Uint64 now = SDL_GetTicks();
@@ -393,6 +438,16 @@ int main(int argc, char* argv[]) {
         double a = best < 0 ? -best : best;
         if (a > ms_win) return false;
 
+        // Note lock — if the next unjudged note in the same column has
+        // already started, this one is unhittable (matches lazer's
+        // OrderedHitPolicy.IsHittable).
+        for (size_t j = (size_t)best_i + 1; j < map.notes.size(); j++) {
+            if (map.notes[j].column != col) continue;
+            if (note_judged[j] || hold_started[j]) continue;
+            if (map_t >= map.notes[j].time) return false;
+            break;
+        }
+
         // Layered extras from the note's hitSound bitfield, resolved against
         // the map's own hitsound bank if it ships one.
         {
@@ -416,6 +471,17 @@ int main(int argc, char* argv[]) {
         } else {
             note_judged[best_i] = true;
         }
+        // force-miss earlier — any earlier unjudged note in the same column
+        // that we didn't pick gets missed (matches lazer's HandleHit).
+        for (size_t j = 0; j < (size_t)best_i; j++) {
+            if (map.notes[j].column != col) continue;
+            if (note_judged[j] || hold_started[j]) continue;
+            note_judged[j] = true;
+            note_ghost[j] = true;
+            cnt_miss++;
+            play_miss_sound();
+        }
+
         if      (a <= p_win)  cnt_perfect++;
         else if (a <= g_win)  cnt_300++;
         else if (a <= gd_win) cnt_200++;
@@ -617,6 +683,7 @@ int main(int argc, char* argv[]) {
                 }
                 audio_queued = false;
                 audio_start_tick = SDL_GetTicks() + 2000;
+                audio_drift_ms = 0.0;
                 result_shown = false;
                 SDL_Log("RESULT: retry");
             }
@@ -669,6 +736,7 @@ int main(int argc, char* argv[]) {
                 if (miss_stream) SDL_ClearAudioStream(miss_stream);
                 audio_queued = false;
                 audio_start_tick = SDL_GetTicks() + 2000;
+                audio_drift_ms = 0.0;
                 SDL_Log("RESTART: reset to t=0");
             }
 
@@ -791,6 +859,17 @@ int main(int argc, char* argv[]) {
                                 SDL_Log("SONGS: parse failed");
                             } else {
                                 map = new_map;
+
+                                last_note_end = 0.0;
+                                for (const auto& n : map.notes) {
+                                    if (n.end_time > last_note_end) last_note_end = n.end_time;
+                                }
+
+                                // Recompute end time for the new map
+                                last_note_end = 0.0;
+                                for (const auto& n : map.notes) {
+                                    if (n.end_time > last_note_end) last_note_end = n.end_time;
+                                }
                                 note_judged.assign(map.notes.size(),  false);
                                 note_hit_time.assign(map.notes.size(), -1.0);
                                 hold_active.assign(map.notes.size(),  false);
@@ -804,8 +883,8 @@ int main(int argc, char* argv[]) {
                                 SDL_AudioSpec spec = {};
                                 // Load per-map hitsounds from the song folder
                                 map_bank.load_from_folder(s.folder);
-                                SDL_Log("HITS: bank loaded %zu samples from %s",
-                                        map_bank.has("soft-hitnormal.wav") ? 1 : 0,
+                                SDL_Log("HITS: bank loaded (soft-hitnormal: %s) from %s",
+                                        map_bank.has("soft-hitnormal.wav") ? "yes" : "no",
                                         s.folder.c_str());
 
                                 if (load_audio_to_pcm(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
@@ -820,6 +899,7 @@ int main(int argc, char* argv[]) {
 
                                 audio_queued = false;
                                 audio_start_tick = SDL_GetTicks() + 2000;
+                audio_drift_ms = 0.0;
                                 compute_geometry();
                                 app_state = AppState::Playing;
                                 SDL_Log("SONGS: entering Playing (%dK, %zu notes)",
@@ -855,7 +935,7 @@ int main(int argc, char* argv[]) {
                     const float row_y0 = 200.0f;
                     const float gap    = 20.0f;
 
-                    for (int i = 0; i < 4; i++) {
+                    for (int i = 0; i < 5; i++) {
                         float ry = row_y0 + i * (row_h + gap);
                         if (stx >= row_x && stx <= row_x + row_w &&
                             sty >= ry && sty <= ry + row_h) {
@@ -874,7 +954,7 @@ int main(int argc, char* argv[]) {
                         const float row_h  = 100.0f;
                         const float row_y0 = 200.0f;
                         const float gap    = 20.0f;
-                        for (int i = 0; i < 4; i++) {
+                        for (int i = 0; i < 5; i++) {
                             float ry = row_y0 + i * (row_h + gap);
                             if (stx >= row_x && stx <= row_x + row_w &&
                                 sty >= ry && sty <= ry + row_h) {
@@ -894,7 +974,10 @@ int main(int argc, char* argv[]) {
                         if      (settings_row == 0) cfg_music_vol    = norm * 1.0f;
                         else if (settings_row == 1) cfg_hitsound_vol = norm * 2.0f;
                         else if (settings_row == 2) cfg_scroll_speed = 1.0f + norm * 39.0f;
-                        else if (settings_row == 3) {
+                        else if (settings_row == 4) {
+                        cfg_audio_offset_ms = (norm - 0.5f) * 400.0f;
+                    }
+                    else if (settings_row == 3) {
                             int preset = (int)(norm * 4.0f);
                             if      (preset == 0) cfg_fps_cap = 60;
                             else if (preset == 1) cfg_fps_cap = 120;
@@ -963,6 +1046,7 @@ int main(int argc, char* argv[]) {
                             if (miss_stream) SDL_ClearAudioStream(miss_stream);
                             audio_queued = false;
                             audio_start_tick = SDL_GetTicks() + 2000;
+                audio_drift_ms = 0.0;
                             paused = false;
                             SDL_Log("PAUSE: retry");
                         } else {
@@ -1025,6 +1109,7 @@ int main(int argc, char* argv[]) {
                 }
                 audio_queued = false;
                 audio_start_tick = SDL_GetTicks() + 2000;
+                audio_drift_ms = 0.0;
                 result_shown = false;
                 SDL_Log("RESULT: tap-retry");
                 continue;
@@ -1041,18 +1126,27 @@ int main(int argc, char* argv[]) {
                 }
                 if (release_col >= 0) {
                     double now_map = (double)SDL_GetTicks() - (double)audio_start_tick;
+                    // Tail window scaled by 1.5x, matching TailNote.RELEASE_WINDOW_LENIENCE.
+                    double tail_win = std::floor(
+                        od_window(map.od, 188.0, 173.0, 158.0)) * 1.5 + 0.5;
                     for (size_t i = 0; i < active_holds.size(); ) {
                         size_t hi = active_holds[i];
                         if (map.notes[hi].column != release_col) { i++; continue; }
                         release_time[hi] = now_map;
-                        if (now_map < map.notes[hi].end_time - 150.0) {
+                        if (now_map < map.notes[hi].end_time - tail_win) {
                             // Released early — break
                             hold_active[hi]  = false;
                             hold_broken[hi]  = true;
                             note_ghost[hi]   = true;
                             note_judged[hi]  = true;
-                            cnt_miss++;
-                            combo = 0;
+                            // Tail result capped at Meh (matches GetCappedResult)
+                            if (!hold_started[hi]) {
+                                cnt_miss++;
+                                combo = 0;
+                            } else {
+                                cnt_50++;
+                                combo = 0;   // body break resets combo either way
+                            }
                             play_miss_sound();
                         } else {
                             // Released cleanly at/after tail — LN resolves
@@ -1113,7 +1207,26 @@ int main(int argc, char* argv[]) {
             }
         }
         // Signed: negative during lead-in, positive during play
+        // Compute current map time. Once audio is playing, derive from
+        // audio playback position, which corrects AAudio startup latency
+        // and drift. Falls back to wall clock during lead-in.
         double now_ms = (double)current_tick - (double)audio_start_tick;
+        if (audio_queued && audio_stream && wav_len > 0) {
+            int queued = SDL_GetAudioStreamQueued(audio_stream);
+            if (queued >= 0) {
+                long long played = (long long)wav_len - (long long)queued;
+                if (played < 0) played = 0;
+                int bytes_per_sec = wav_spec.freq * wav_spec.channels *
+                                    (SDL_AUDIO_BITSIZE(wav_spec.format) / 8);
+                if (bytes_per_sec > 0) {
+                    double audio_ms = (double)played / bytes_per_sec * 1000.0;
+                    // blend toward audio to smooth jitter
+                    double target_drift = audio_ms - now_ms;
+                    audio_drift_ms = audio_drift_ms * 0.9 + target_drift * 0.1;
+                }
+            }
+        }
+        now_ms += audio_drift_ms + cfg_audio_offset_ms;
         if (paused || resuming)
             now_ms = (double)pause_started_tick - (double)audio_start_tick;
 
@@ -1132,7 +1245,7 @@ int main(int argc, char* argv[]) {
         // Result screen trigger: all notes done + 2 seconds grace
         if (!result_shown && !paused && !resuming &&
             !map.notes.empty() &&
-            now_ms > map.notes.back().end_time + 2000.0)
+            now_ms > last_note_end + 2000.0)
         {
             result_shown = true;
             if (audio_stream) SDL_PauseAudioStreamDevice(audio_stream);
@@ -1167,7 +1280,7 @@ int main(int argc, char* argv[]) {
 
         while (app_state == AppState::Playing &&
                miss_cursor < map.notes.size() &&
-               map.notes[miss_cursor].time < now_ms - 70.0) {
+               map.notes[miss_cursor].time < now_ms - od_miss_window) {
             size_t i = miss_cursor;
             if (!note_judged[i] && !hold_started[i]) {
                 if (map.notes[i].is_hold) {
@@ -1425,11 +1538,8 @@ int main(int argc, char* argv[]) {
                      + cnt_100*100.0 + cnt_50*50.0)
                     / (total_judged * 300.0) * 100.0;
             }
-            long raw_score = (long)(cnt_perfect)*300*300 + (long)cnt_300*300*300
-                           + (long)cnt_200*200*200 + (long)cnt_100*100*100
-                           + (long)cnt_50*50*50;
-            long max_score = total_notes * 300 * 300;
-            long score = max_score > 0 ? (long)((double)raw_score / max_score * 1000000.0) : 0;
+            long score = compute_lazer_score(cnt_perfect, cnt_300, cnt_200,
+                                              cnt_100, cnt_50, (int)total_notes);
 
             const char* rank = "D";
             if      (acc >= 100.0) rank = "SS";
@@ -1496,21 +1606,23 @@ int main(int argc, char* argv[]) {
             const float label_gap = 12.0f;
 
             // Rows: 0=music volume, 1=hitsound volume, 2=scroll speed, 3=fps cap
-            const char* labels[4] = {
+            const char* labels[5] = {
                 "Music Volume",
                 "Hitsound Volume",
                 "Scroll Speed",
-                "FPS Cap"
+                "FPS Cap",
+                "Audio Offset"
             };
 
-            float values[4] = {
+            float values[5] = {
                 cfg_music_vol,
                 cfg_hitsound_vol,
                 cfg_scroll_speed,
-                (float)cfg_fps_cap
+                (float)cfg_fps_cap,
+                (float)cfg_audio_offset_ms
             };
 
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 5; i++) {
                 float ry = row_y0 + i * (row_h + row_gap);
 
                 // Label
@@ -1529,6 +1641,7 @@ int main(int argc, char* argv[]) {
                 if      (i == 0) fill = cfg_music_vol    / 1.0f;
                 else if (i == 1) fill = cfg_hitsound_vol / 2.0f;  // 0..2 range
                 else if (i == 2) fill = (cfg_scroll_speed - 1.0f) / 39.0f;  // 1.0..40.0
+                else if (i == 4) fill = (cfg_audio_offset_ms + 200.0f) / 400.0f;
                 else if (i == 3) {
                     int preset = 0;
                     if      (cfg_fps_cap == 60)  preset = 0;
@@ -1549,10 +1662,12 @@ int main(int argc, char* argv[]) {
                 if      (i == 0) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_music_vol);
                 else if (i == 1) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_hitsound_vol);
                 else if (i == 2) SDL_snprintf(buf, sizeof(buf), "%.2f", cfg_scroll_speed);
+                else if (i == 4) fill = (cfg_audio_offset_ms + 200.0f) / 400.0f;
                 else if (i == 3) {
                     if      (cfg_fps_cap == 0)   SDL_snprintf(buf, sizeof(buf), "uncapped");
                     else                          SDL_snprintf(buf, sizeof(buf), "%d", cfg_fps_cap);
                 }
+                else if (i == 4) SDL_snprintf(buf, sizeof(buf), "%+.0f ms", cfg_audio_offset_ms);
 
                 SDL_SetRenderScale(renderer, 4.0f, 4.0f);
                 SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
