@@ -36,6 +36,10 @@
 - None currently open
 
 ## Std → Mania conversion (planned feature)
+**Status:** std maps stay on disk. Song select filters them out with
+`if (m.mode != 3) return false;` in `song_select.cpp`. That guard is
+NON-DESTRUCTIVE and is what we remove when the converter lands.
+
 Reference: ppy/osu ManiaBeatmapConverter.cs + Beatmaps/Patterns/Legacy/*
 - Key mods 4K–9K are ranked, 1K–3K and 10K are unranked.
 - Score multiplier: 0.90x (changed from 1.0x in Aug 2025, PR #30506).
