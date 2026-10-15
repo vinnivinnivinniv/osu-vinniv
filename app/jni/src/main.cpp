@@ -631,6 +631,23 @@ int main(int argc, char* argv[]) {
     scan.start("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs",
                "/sdcard/Android/data/sh.ppy.osuvinniv/files/inbox");
 
+    // Song-select list viewport. Single source of truth for render + touch
+    // so geometry can never drift between the two.
+    struct ListGeom { float x, y, w, h, row_h, footer_h; };
+    auto get_list_geom = [&]() -> ListGeom {
+        ListGeom g;
+        g.row_h    = 90.0f;
+        // Right half, 4% margin on the right. Left 40% is reserved for
+        // a future local leaderboard panel.
+        g.w        = win_w * 0.50f;
+        g.x        = win_w - g.w - win_w * 0.04f;
+        g.y        = win_h * 0.20f;
+        g.footer_h = win_h * 0.15f;
+        g.h        = win_h - g.y - g.footer_h;
+        if (g.h < 100.0f) g.h = 100.0f;
+        return g;
+    };
+
     int   selected_index = 0;
     float song_scroll    = 0.0f;
 
@@ -750,6 +767,10 @@ int main(int argc, char* argv[]) {
             preview_key.clear();
             song_bg_folder.clear();
             SDL_Log("SCAN: consumed %zu entries", songs.size());
+            for (int _i = 0; _i < 5 && _i < (int)songs.size(); _i++)
+                SDL_Log("SONG[%d]: artist='%s' title='%s' ver='%s'",
+                        _i, songs[_i].artist.c_str(),
+                        songs[_i].title.c_str(), songs[_i].version.c_str());
         }
 
         Uint64 frame_start = SDL_GetTicksNS() / 1000ULL;
@@ -918,13 +939,25 @@ int main(int argc, char* argv[]) {
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
+            // Song select — settings button works even while scanning
+            // (songs empty). Short-circuit before the list-drag guard.
+            if (app_state == AppState::SongSelect && e.type == SDL_EVENT_FINGER_DOWN) {
+                float bstx = e.tfinger.x * win_w;
+                float bsty = e.tfinger.y * win_h;
+                if (bstx >= 40.0f && bstx <= 280.0f &&
+                    bsty >= 140.0f && bsty <= 220.0f) {
+                    app_state = AppState::Settings;
+                    SDL_Log("SETTINGS: open (pre-scan)");
+                    continue;
+                }
+            }
             // SONG SELECT DRAG / TAP
             if (app_state == AppState::SongSelect && !songs.empty()) {
-                const float list_x = 60.0f;
-                const float list_y = 140.0f;
-                const float row_h  = 110.0f;
-                const float footer_h = 120.0f;
-                const float list_h = (float)win_h - list_y - footer_h;
+                ListGeom lg = get_list_geom();
+                const float list_x = lg.x;
+                const float list_y = lg.y;
+                const float row_h  = lg.row_h;
+                const float list_h = lg.h;
                 const float total_h = (float)songs.size() * row_h;
                 const float max_scroll = total_h > list_h ? total_h - list_h : 0.0f;
 
@@ -933,10 +966,10 @@ int main(int argc, char* argv[]) {
                     float ty = e.tfinger.y * (float)win_h;
 
                     // Settings button — mark candidate, confirm on FINGER_UP
-                    const float sbx = (float)win_w - 320.0f;
-                    const float sby = 40.0f;
-                    const float sbw = 260.0f;
-                    const float sbh = 90.0f;
+                    const float sbx = 40.0f;
+                    const float sby = 140.0f;
+                    const float sbw = 240.0f;
+                    const float sbh = 80.0f;
                     if (tx >= sbx && tx <= sbx + sbw &&
                         ty >= sby && ty <= sby + sbh) {
                         settings_btn_candidate = true;
@@ -988,6 +1021,8 @@ int main(int argc, char* argv[]) {
                     settings_btn_candidate = false;
                     if (!song_drag_moved) {
                         float ty = e.tfinger.y * (float)win_h;
+                        // Reject taps outside the visible list viewport.
+                        if (ty < list_y || ty > list_y + list_h) continue;
                         int hit = (int)((ty - list_y + song_scroll) / row_h);
                         if (hit >= 0 && hit < (int)songs.size()) {
                             // Tap UX: first tap selects (and previews bg),
@@ -1866,19 +1901,51 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderScale(renderer, 3.0f, 3.0f);
             SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             SDL_RenderDebugText(renderer, 8.0f, 6.0f, "osu!vinniv - song select");
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
 
             if (!scan.complete()) {
+                int p = scan.progress.load();
+                int t = scan.total.load();
+
+                char sbuf[64];
+                if (t > 0) SDL_snprintf(sbuf, sizeof(sbuf), "Scanning %d / %d", p, t);
+                else       SDL_snprintf(sbuf, sizeof(sbuf), "Scanning...");
+
+                // Centered text at 3x scale
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
                 SDL_SetRenderDrawColor(renderer, 220, 220, 240, 255);
-                SDL_RenderDebugText(renderer, (float)win_w / 6.0f - 48.0f,
-                                    (float)win_h / 6.0f, "Scanning...");
+                int n = (int)strlen(sbuf);
+                SDL_RenderDebugText(renderer,
+                                    (float)win_w / 6.0f - (float)n * 4.0f,
+                                    (float)win_h / 6.0f - 20.0f, sbuf);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+                // Progress bar at 1x scale
+                float bar_w = (float)win_w * 0.6f;
+                float bar_h = 12.0f;
+                float bx = ((float)win_w - bar_w) * 0.5f;
+                float by = (float)win_h * 0.5f + 20.0f;
+
+                SDL_SetRenderDrawColor(renderer, 40, 45, 60, 255);
+                SDL_FRect bar_bg = { bx, by, bar_w, bar_h };
+                SDL_RenderFillRect(renderer, &bar_bg);
+
+                if (t > 0) {
+                    float frac = (float)p / (float)t;
+                    if (frac < 0.0f) frac = 0.0f;
+                    if (frac > 1.0f) frac = 1.0f;
+                    SDL_SetRenderDrawColor(renderer, 90, 160, 240, 255);
+                    SDL_FRect bar_fill = { bx, by, bar_w * frac, bar_h };
+                    SDL_RenderFillRect(renderer, &bar_fill);
+                }
             }
 
-            // Settings button (top-right, drawn)
+            // Settings button (upper-left, below the title bar)
             {
-                const float bx = (float)win_w - 320.0f;
-                const float by = 40.0f;
-                const float bw = 260.0f;
-                const float bh = 90.0f;
+                const float bx = 40.0f;
+                const float by = 140.0f;
+                const float bw = 240.0f;
+                const float bh = 80.0f;
 
                 SDL_SetRenderDrawColor(renderer, 40, 50, 70, 255);
                 SDL_FRect bg = { bx, by, bw, bh };
@@ -1887,20 +1954,22 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
                 SDL_RenderRect(renderer, &bg);
 
-                // Text centered — "settings" is 8 chars, at scale 3 each is 24px
-                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                // Text centered — "settings" is 8 chars, at scale 2 each is 16px
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
                 SDL_SetRenderDrawColor(renderer, 220, 220, 140, 255);
-                float text_w_px = 8.0f * 24.0f;
-                float text_x = (bx + bw * 0.5f - text_w_px * 0.5f) / 3.0f;
-                float text_y = (by + bh * 0.5f - 12.0f) / 3.0f;
+                float text_w_px = 8.0f * 16.0f;
+                float text_x = (bx + bw * 0.5f - text_w_px * 0.5f) / 2.0f;
+                float text_y = (by + bh * 0.5f - 8.0f) / 2.0f;
                 SDL_RenderDebugText(renderer, text_x, text_y, "settings");
                 SDL_SetRenderScale(renderer, 1.0f, 1.0f);
             }
 
-            const float row_h  = 110.0f;
-            const float list_x = 60.0f;
-            const float list_y = 140.0f;
-            const float list_w = (float)win_w - 120.0f;
+            ListGeom lg = get_list_geom();
+            const float row_h  = lg.row_h;
+            const float list_x = lg.x;
+            const float list_y = lg.y;
+            const float list_w = lg.w;
+            const float list_h = lg.h;
 
             if (songs.empty()) {
                 SDL_SetRenderScale(renderer, 3.0f, 3.0f);
@@ -1913,21 +1982,38 @@ int main(int argc, char* argv[]) {
                 if (selected_index < 0) selected_index = 0;
                 if (selected_index >= n) selected_index = n - 1;
 
+                // Two-pass: rows (clipped), then text (unclipped but bounded
+                // by the same y-range gate). Keeps render scale changes away
+                // from the clip rect, which SDL3 handles unreliably when they
+                // interleave.
+                SDL_Rect list_clip = { (int)list_x, (int)list_y,
+                                       (int)list_w, (int)list_h };
+                SDL_SetRenderClipRect(renderer, &list_clip);
                 for (int i = 0; i < n; i++) {
                     float ry = list_y + i * row_h - song_scroll;
-                    if (ry + row_h < 0 || ry > (float)win_h) continue;
-
+                    if (ry + row_h < list_y || ry > list_y + list_h) continue;
                     bool sel = (i == selected_index);
-
                     SDL_SetRenderDrawColor(renderer,
                         sel ? 60 : 25, sel ? 80 : 30, sel ? 130 : 40, 255);
                     SDL_FRect row = { list_x, ry, list_w, row_h - 6 };
                     SDL_RenderFillRect(renderer, &row);
-
                     if (sel) {
                         SDL_SetRenderDrawColor(renderer, 200, 220, 255, 255);
                         SDL_RenderRect(renderer, &row);
                     }
+                }
+                SDL_SetRenderClipRect(renderer, nullptr);
+
+                // Text pass — no clip (SDL3 clip+scale interleave is buggy),
+                // instead gate on BOTH top and bottom so text only draws when
+                // it fully fits inside the panel. Rows partially scrolled off
+                // show their bg (clipped) but no text (cleaner than overflow).
+                const float TEXT_BOTTOM = 68.0f;  // line2 baseline (52) + glyph (16)
+                for (int i = 0; i < n; i++) {
+                    float ry = list_y + i * row_h - song_scroll;
+                    if (ry + row_h < list_y || ry > list_y + list_h) continue;
+                    if (ry + 14.0f < list_y) continue;                    // top text clipped
+                    if (ry + TEXT_BOTTOM > list_y + list_h) continue;    // bottom text clipped
 
                     char line1[256];
                     char line2[128];
@@ -1939,17 +2025,20 @@ int main(int argc, char* argv[]) {
 
                     SDL_SetRenderScale(renderer, 3.0f, 3.0f);
                     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-                    SDL_RenderDebugText(renderer, list_x/3.0f + 8.0f,
-                                                 ry/3.0f + 6.0f, line1);
+                    SDL_RenderDebugText(renderer,
+                        (list_x + 14.0f) / 3.0f, (ry + 14.0f) / 3.0f, line1);
+                    SDL_SetRenderScale(renderer, 2.0f, 2.0f);
                     SDL_SetRenderDrawColor(renderer, 180, 180, 200, 255);
-                    SDL_RenderDebugText(renderer, list_x/3.0f + 8.0f,
-                                                 ry/3.0f + 28.0f, line2);
+                    SDL_RenderDebugText(renderer,
+                        (list_x + 14.0f) / 2.0f, (ry + 52.0f) / 2.0f, line2);
                     SDL_SetRenderScale(renderer, 1.0f, 1.0f);
                 }
 
-                // SCROLLBAR — only show if content overflows
-                float footer_h = 120.0f;
-                float list_h   = (float)win_h - list_y - footer_h;
+                // SCROLLBAR — only show if content overflows.
+                // Use lg.h (the actual viewport height) — do NOT recompute
+                // from win_h here; that shadowing bug made the track extend
+                // below the panel.
+                SDL_SetRenderClipRect(renderer, nullptr);
                 float total_h  = (float)n * row_h;
                 if (total_h > list_h) {
                     float track_x = list_x + list_w + 8.0f;

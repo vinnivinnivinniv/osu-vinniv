@@ -194,6 +194,36 @@ Edge cases to watch:
 - Two rapid cold starts (user force-quits mid-scan) — worker must be
   joinable on shutdown, no detached threads.
 
+## Song select: text masking at panel boundaries
+
+Symptom: rows partially scrolled off the top or bottom of the song-
+select panel draw their backgrounds (clipped correctly) but render
+no text — because the text pass is unclipped by design.
+
+Why the text pass is unclipped: SDL3's `SDL_RenderDebugText` interleaves
+badly with `SDL_SetRenderClipRect` when render scale is also changing.
+With clip active and scale != 1.0, the debug-text texture batch fails
+and no text renders at all (see commit history around the 2-pass fix).
+Unclipping the text pass was the workaround that made text appear.
+
+Current compromise: text only draws for rows whose text block fits
+fully inside the panel. Partial rows show bg only. Visible as "pop-in"
+during scroll instead of smooth scroll-then-clip.
+
+Proper fix (any of these):
+  1. Pre-render each row's text to an SDL_Texture (cache by index).
+     Then draw textured quads — textures respect clip rects cleanly.
+     Row text is static per song, so the cache never invalidates.
+     Memory: ~600 rows x 2 text textures x ~1KB = ~1.2 MB. Fine.
+  2. Use SDL_SetRenderTarget to an offscreen panel-sized surface,
+     draw rows (with text) to it, then blit the whole surface.
+     More invasive; changes the whole render path for song select.
+  3. Once a proper font renderer lands (see Low priority: Better fonts),
+     this problem likely goes away — stb_truetype-based rendering
+     uses texture draws that behave normally with clip rects.
+
+Option 1 is the recommended path when this becomes worth doing.
+
 ## Song progress bar
 Thin horizontal bar across the top (or bottom) of the playfield that
 fills over the song length. Data: track position from audio stream vs
