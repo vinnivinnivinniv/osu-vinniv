@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <cmath>
+#include <algorithm>
 #include <fstream>
 #include <vector>
 #include "parser.h"
@@ -144,7 +145,7 @@ int main(int argc, char* argv[]) {
         SDL_Log("MISS: load failed: %s", SDL_GetError());
     }
 
-    const Uint64 audio_start_tick = SDL_GetTicks() + 2000;  // 2s lead-in
+    Uint64 audio_start_tick = SDL_GetTicks() + 2000;  // 2s lead-in
     bool audio_queued = false;
 
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
@@ -271,6 +272,32 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_EVENT_KEY_DOWN &&
                 e.key.key == SDLK_AC_BACK) {
                 running = false;
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+                e.key.key == SDLK_R) {
+                std::fill(note_judged.begin(),  note_judged.end(),  false);
+                std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
+                std::fill(hold_active.begin(),  hold_active.end(),  false);
+                std::fill(hold_started.begin(), hold_started.end(), false);
+                std::fill(hold_broken.begin(),  hold_broken.end(),  false);
+                std::fill(note_ghost.begin(),   note_ghost.end(),   false);
+                std::fill(release_time.begin(), release_time.end(), 0.0);
+                for (int i = 0; i < 16; i++) column_pressed[i] = false;
+                active_holds.clear();
+                active_fingers.clear();
+                combo = 0; max_combo = 0;
+                cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+                cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+                miss_cursor = 0;
+                if (audio_stream) {
+                    SDL_ClearAudioStream(audio_stream);
+                    SDL_PauseAudioStreamDevice(audio_stream);
+                }
+                if (hit_stream)  SDL_ClearAudioStream(hit_stream);
+                if (miss_stream) SDL_ClearAudioStream(miss_stream);
+                audio_queued = false;
+                audio_start_tick = SDL_GetTicks() + 2000;
+                SDL_Log("RESTART: reset to t=0");
             }
 
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
