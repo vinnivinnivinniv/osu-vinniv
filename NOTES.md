@@ -27,5 +27,10 @@
 - Custom hitsound banks per map (SampleSet / SampleIndex in .osu)
 - Std → mania converts
 
+## Notes
+- **FPS cap change requires restart** for vsync to toggle. In-app change
+  updates the software cap but leaves the SDL vsync state alone, because
+  `SDL_SetRenderVSync(renderer, 1)` can block on Android.
+
 ## Known bugs
 - None currently open
