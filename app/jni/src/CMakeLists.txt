@@ -4,10 +4,22 @@ project(osu_vinniv CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(MINIZ_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/miniz)
+
 add_library(main SHARED
     main.cpp
     parser.cpp
     song_select.cpp
+    osz_import.cpp
+    ${MINIZ_DIR}/miniz.c
+    ${MINIZ_DIR}/miniz_tdef.c
+    ${MINIZ_DIR}/miniz_tinfl.c
+    ${MINIZ_DIR}/miniz_zip.c
+)
+
+target_include_directories(main PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${MINIZ_DIR}
 )
 
 find_library(GLESv3 GLESv3 REQUIRED)

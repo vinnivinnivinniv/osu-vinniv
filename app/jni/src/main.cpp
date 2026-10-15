@@ -7,6 +7,7 @@
 #include <vector>
 #include "parser.h"
 #include "song_select.h"
+#include "osz_import.h"
 
 enum class AppState { SongSelect, Playing, Result };
 
@@ -308,6 +309,12 @@ int main(int argc, char* argv[]) {
     int frames = 0;
     // ---- Song list + state machine ----
     AppState app_state = AppState::SongSelect;
+
+    // Auto-import any .osz files sitting in files/inbox/
+    import_all_osz(
+        "/sdcard/Android/data/sh.ppy.osuvinniv/files/inbox",
+        "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs");
+
     std::vector<SongEntry> songs =
         scan_songs("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs");
     int   selected_index = 0;
