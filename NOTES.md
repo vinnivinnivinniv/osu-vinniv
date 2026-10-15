@@ -147,8 +147,6 @@ would need to become position-based, like lazer's
 
 ## High priority
 - **Variable BPM / SV support.** See "Mapper-set scroll speed" above.
-- **Per-K key mapping.** See "Settings: per-K key mapping" below.
-  Unblocks 6K/7K keyboard. Defaults: `S D F Space J K L` for 7K.
 
 ## Asset types
 - **Map thumbnail** — small crop, for song select row preview
@@ -344,6 +342,14 @@ Upgrade path:
   OGG decode that hitched every selection change.
 - **Cache v3** (f6ba3a7). `SongEntry.preview_time` added; readers reject
   `v2` files so a stale index can't silently lose the field.
+- **Per-K keybindings** (ccffca3). Table-driven settings screen;
+  capture UI rebinds 4K-10K live. `keys_Nk=` in settings.ini.
+  Defaults match modern osu!mania. See "Settings: per-K key mapping"
+  below for the original design notes.
+- **Settings label swap** (ccffca3). Audio Offset was displaying FPS
+  because of an `else if` branch assigning to `fill` instead of `buf`,
+  leaving the previous row's value in the string buffer. Rewritten as
+  a table — one code path per row type.
 
 ## Std → Mania conversion (planned feature)
 **Status:** std maps stay on disk. Song select filters them out with
