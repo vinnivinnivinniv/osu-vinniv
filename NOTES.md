@@ -318,6 +318,14 @@ Upgrade path:
   captures them. `cfg_*`, `map_bank`, `last_miss_sound_tick`, and
   `selected_index` all caused "undeclared identifier" errors when
   placed later.
+- **scrcpy's `--keyboard=uhid` caps at 6 simultaneous keys.** It presents
+  a USB HID boot-protocol keyboard, whose report format has exactly 6
+  key slots. 7K charts with 6-note chords + a hold, or full 7-note chords,
+  will drop the 7th. Not our bug; a real USB keyboard via scrcpy's HID
+  shim has the same limit. Use an OTG keyboard with NKRO if testing those.
+- **scrcpy on Ubuntu 24.04 / Pop!_OS ships as 1.25 and crashes on Android 15**
+  (`NoSuchMethodException` on `SurfaceControl.createDisplay`). Purge it and
+  use the self-managed build in `~/Work/scrcpy/`; add to PATH via `~/.bashrc`.
 
 ## Notes
 - **FPS cap change requires restart** for vsync to toggle. In-app change
