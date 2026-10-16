@@ -28,7 +28,7 @@ A working 4K / 7K mania client that:
 
 ## Status
 
-- [x] Phase 1: SDL3 + GLES3 hello-world, ~2000 FPS on Vivo V29e
+- [x] Phase 1: SDL3 + GLES3 hello-world, ~3000 FPS on Vivo V29e
 - [ ] Phase 2: `.osu` parser
 - [ ] Phase 3: static playfield render
 - [ ] Phase 4: scrolling + audio
