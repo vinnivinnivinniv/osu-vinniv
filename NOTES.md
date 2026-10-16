@@ -40,7 +40,7 @@ grep 'SDL/APP' /tmp/startup.log
 
 ## This session shipped (2026-10-16 → 17)
 
-Mechanics (see `docs/mechanics.md` for the full audit table):
+Mechanics (see `docs/mechanics.md` for the audit table):
 - SV/BPM timing-point accumulator using lazer `GetMostCommonBeatLength`
 - Earliest-unjudged note selection; no skip-forward on expired note
 - Hold tail scored on completion/release (2 per hold, matching lazer)
@@ -188,72 +188,302 @@ would need to become position-based, like lazer's
 ## High priority
 
 - **Search field.** Filter the song list as you type. Needs:
-  - `SDL_StartTextInput` / `SDL_EVENT_TEXT_INPUT` wiring for the Android
-    soft keyboard.
-  - Filter state (query string) and a decision about how filtered results
-    map to `songs` indices.
-  - A text-input widget: cursor, backspace, clear.
-  - Filter-aware selection / preview / play.
+  - `SDL_StartTextInput` / `SDL_EVENT_TEXT_INPUT` wiring for the
+    Android soft keyboard.
+  - Filter state and a decision on how filtered results map to
+    `songs` indices (view over `songs` vs a parallel vector).
+  - A text-input widget: caret, backspace, clear.
+  - Filter-aware selection, preview, and play.
   Deferred to a dedicated session; touches the whole song-select UX.
 
-- **Video decode / poster frame.** Maps with `Video,0,"clip.mp4"` and no
-  shipped image currently render with no background (O108ROCKET Garden
-  set, Vivlos, etc. once their mp4 is the only media). Options:
+- **Video decode / poster frame.** Maps with `Video,0,"clip.mp4"` and
+  no shipped image render with no background (O108ROCKET Garden set,
+  Vivlos, etc.). Options:
   - Extract first frame with ffmpeg (large dependency, real work).
   - Fall back to `clip.jpg` / `clip.png` if the mapper shipped a still
-    alongside (partially done in the resolver — improves but doesn't
+    alongside (partially done in the resolver — helps but doesn't
     solve video-only maps).
   - Show a "video" placeholder with the song title.
 
+## Asset types
+- **Map thumbnail** — small crop, for song select row preview
+- **Background image** — full bg.jpg / bg.png shown behind gameplay and selected song
+- These are separate assets and need separate load paths. bg.jpg lives
+  in the set folder; thumbnails may not exist in .osz at all (BeatmapExporter
+  can generate them but they're not shipped in every pack).
+
+## Star rating sort
+- Native mania maps: sort by computed mania star rating.
+- Converted std maps: star rating is computed from the std difficulty
+  values, not the mania conversion. So sorting converts by mania stars
+  would misrepresent them.
+- Policy: when the std->mania converter ships, use the original std
+  star rating for sort order on converted entries. Mark them with a
+  "(Convert)" tag in song select.
+
+## Cache version discipline
+
+`song_cache.cpp` writes `songs.index` keyed on the top-level songs dir
+mtime. Per-folder edits that don't bump that mtime aren't re-scanned.
+
+**Rule:** whenever parser or resolver behavior changes for a field that
+lands in `SongEntry`, bump the cache version (`v3` -> `v4`) in
+`song_cache.cpp`. Two sites: the reader's `compare(0, 2, "vN")` and the
+writer's `<< "vN "` line. Bumping forces a one-time rescan on first
+launch and every stale entry gets rebuilt.
+
+Made this mistake when adding PreviewTime (v2->v3, done right) and again
+just now: parser/resolver bg fixes did NOT bump, so Murumoo kept stale
+`bga.mp4` until a manual cache delete. Should have been v3 -> v4.
+
+## Async song scan
+
+Cold-cache startup blocks the main thread for 5-10 s while 500+ `.osu`
+files are parsed for metadata. Same class as the old preview decode:
+work that must happen, on the thread that draws.
+
+Fix shape (mirrors `PreviewPlayer`):
+- `scan_songs()` already returns a `std::vector<SongEntry>`; make it
+  callable from a worker.
+- `main()` starts the worker on first frame, shows the song select
+  screen immediately with an empty list + `Scanning...` label.
+- Worker posts progress (files parsed / total) via an atomic; main
+  draws it.
+- On completion, worker hands back the vector under a mutex, main
+  swaps and stops showing the label.
+- Cache-hit path stays synchronous — reading `songs.index` is ~10 ms.
+  Only the rescan path needs the worker.
+
+Edge cases to watch:
+- Tap during scan — entries `songs` may be empty; hit-test must
+  bail if `songs.empty()`.
+- Preview/bg pointers into `songs[i]` need re-anchoring when the
+  vector is replaced.
+- Two rapid cold starts (user force-quits mid-scan) — worker must be
+  joinable on shutdown, no detached threads.
+
+## Song select: text masking at panel boundaries
+
+Symptom: rows partially scrolled off the top or bottom of the song-
+select panel draw their backgrounds (clipped correctly) but render
+no text — because the text pass is unclipped by design.
+
+Why the text pass is unclipped: SDL3's `SDL_RenderDebugText` interleaves
+badly with `SDL_SetRenderClipRect` when render scale is also changing.
+With clip active and scale != 1.0, the debug-text texture batch fails
+and no text renders at all (see commit history around the 2-pass fix).
+Unclipping the text pass was the workaround that made text appear.
+
+Current compromise: text only draws for rows whose text block fits
+fully inside the panel. Partial rows show bg only. Visible as "pop-in"
+during scroll instead of smooth scroll-then-clip.
+
+Proper fix (any of these):
+  1. Pre-render each row's text to an SDL_Texture (cache by index).
+     Then draw textured quads — textures respect clip rects cleanly.
+     Row text is static per song, so the cache never invalidates.
+     Memory: ~600 rows x 2 text textures x ~1KB = ~1.2 MB. Fine.
+  2. Use SDL_SetRenderTarget to an offscreen panel-sized surface,
+     draw rows (with text) to it, then blit the whole surface.
+     More invasive; changes the whole render path for song select.
+  3. Once a proper font renderer lands (see Low priority: Better fonts),
+     this problem likely goes away — stb_truetype-based rendering
+     uses texture draws that behave normally with clip rects.
+
+Option 1 is the recommended path when this becomes worth doing.
+
+## Song progress bar
+Thin horizontal bar across the top (or bottom) of the playfield that
+fills over the song length. Data: track position from audio stream vs
+total audio length. Redraw per frame from a cached texture.
+Reference: osu.Game/Screens/Play/SongProgress.cs
+
+## Settings: per-K key mapping
+Currently keybinds are hardcoded: D F J K for 4K, plus per-note column
+input from touch. Users need to bind keys per column count (1K through
+10K) and save them. Storage: settings.ini entries like
+  keys_4k = D,F,J,K
+  keys_7k = S,D,F,Space,J,K,L
+Parsing: split on comma, store as vector<int> (SDL scancodes).
+Settings screen: keyboard capture mode or text entry.
+Reference: osu.Game.Rulesets.Mania/ManiaInputManager.cs,
+osu.Game/Input/Bindings/*.cs
+
+## UI reference (from real lazer, captured 2026-10-16)
+
+### Song select — details panel (selected beatmap)
+- Large bg image behind, dimmed
+- Card centered: osu! logo, title, artist
+- Mod icons row
+- Difficulty name + star rating chip
+- Source + Mapper text below
+- Right sidebar: Visual Settings (Background dim / Background blur sliders,
+  Storyboard/video toggle, Beatmap skins toggle, Beatmap colours toggle,
+  Combo colour normalisation slider)
+- Bottom: Audio Settings (Beatmap hitsounds toggle, Audio offset slider)
+- Bottom-left: big pink "Back" button
+- Warning banner top-left: "This beatmap contains scenes with rapidly
+  flashing colours" — epilepsy warning
+
+### Song select — listing (all difficulties)
+- Search bar top-right with magnifier icon
+- "N matches" count under search
+- Star Rating filter: dual-handle slider 0.0 to ∞
+- Toggles: "Show converts"
+- Dropdowns: Sort (Title), Group (None), Collection (All beatmaps)
+- Row per difficulty: [4K] Version mapped by mapper, star rating, mod icons
+- Selected row highlighted with vertical accent color
+- Bottom bar: Back | Mods | Random | Options buttons
+- osu! logo bottom-right corner
+- Settings icon top-left (grid)
+
+### Gameplay HUD
+- Score top-left in digital font, blue gradient background bar
+- Progress bar integrated into score widget
+- Accuracy top-right, percent format
+- PP counter top-right below accuracy
+- Leaderboard entry (#1 with avatar + player name) left-middle
+- Left/right side: vertical difficulty bar with tick markers
+- Bottom: song progress bar (thin line), elapsed time left, total time right
+- X button bottom-right (pause/exit)
+- MISS text centered above judgement line in red
+- Hold notes: gradient body, arrow glyphs on head/tail
+- Column backgrounds: colored vertical strips, one per key
+- Column hit lighting: bright flash on hit
+
+### Result screen
+- Circular rank ring, colored by rank (SSH=rainbow, SS/S=green, A=blue, B=orange, C=red, D=purple)
+- Rank letter centered inside ring
+- Full score (large) below
+- Mod icons row
+- Difficulty + mapper
+- 3-column stat block: ACCURACY | MAX COMBO | PP
+- Row of hit judgements: PERFECT | GREAT | GOOD | OK | MEH | MISS with counts
+- "Played on <date>" timestamp
+- Bottom bar: Back | Save replay | Retry | More options | Favorite
+
+### Settings screen (lazer parity)
+- Sidebar: General, Skin, Input, User Interface, Gameplay, osu!, osu!taiko,
+  osu!mania, Audio, Graphics, Online
+- Search bar top of content area
+- Volume sliders: Master, Master (window inactive), Effect, Music — all
+  slider with % label
+- Offset adjustment section: Audio offset slider (ms), suggested offset
+  from last play, "Apply suggested offset" button
+
+## Song list row format (lazer parity)
+Reference: lazer song select difficulty listing, captured 2026-10-16.
+
+Each difficulty row shows (left to right):
+  1. Star rating chip — colored pill with ★ and value, e.g. [★ 1.84]
+     Color ramps: 1.x = green, 2.x = blue-green, 3.x = teal,
+     4.x = yellow, 5.x = orange, 6.x = red. Follows lazer's
+     OsuColour.ForStarDifficulty() gradient.
+  2. "[NK] Difficulty name mapped by mapper"
+     - N = key count, K suffix. E.g. "[4K]", "[7K]".
+     - Difficulty name in lighter text.
+     - "mapped by <mapper>" in dimmed text after.
+  3. Mod icons row on the right (circular glyphs) — only if the
+     score for this difficulty was set with mods. Uses the mod's
+     IconSymbol. On our client: no mods yet, so skip.
+  4. RANKED badge — small colored chip, only on the set header row.
+
+Header row (top of a set) shows:
+  - Title in large white
+  - Artist in smaller dimmed text
+  - Ranked / Loved / Qualified / Graveyard badge
+
+Our current row format is:
+  Line 1: "Artist - Title"
+  Line 2: "[Version]  NK  ODxx"
+
+Upgrade path:
+  - Add star chip (draw circle + text inside via SDL_RenderDebugText,
+    or pre-render a small texture per star tier)
+  - Reformat line 2 to "[4K] Version mapped by mapper"
+  - Group rows by beatmap set: title/artist header once per set,
+    difficulty rows indented underneath. Requires a set-aware scan
+    (our `songs/` layout already groups by folder, so this is mostly
+    a rendering change).
+
 ## Medium priority
+- Result → song select (currently tap = retry; only Esc goes back)
+- On-screen restart button (R key works)
+- Star rating display in song select (needs diffcalc — probably
+  reuse a smaller difficulty calculation or skip entirely)
+- Backup/shared audio: currently every song folder duplicates its
+  hitsounds; could share via files/skin/default/
 
-- **Text masking on song list.** Rows partially scrolled off the top or
-  bottom draw their backgrounds (clipped) but no text — the text pass is
-  unclipped because `SDL_RenderDebugText` + `SDL_SetRenderClipRect` +
-  render-scale changes interleave badly on GLES3. Visible as "pop-in"
-  during scroll. Proper fix: pre-render each row's text to a cached
-  `SDL_Texture`; textures respect clip rects cleanly. Roughly 45 min.
 
-- **"Shrink game to avoid cameras and notches" toggle.** Matches lazer's
-  Graphics → Layout setting. Adds `safe_area=0/1` to settings.ini; uses
-  `SDL_GetWindowSafeArea` to set a render viewport and to pad input
-  hit-tests accordingly. 60–90 min.
+## Mania key conversions (Key mods)
 
-- **Song progress bar.** Thin bar across the top (or bottom) of the
-  playfield, filling from `now_ms` vs `last_note_end`. Cosmetic; ~20 min.
+`ManiaModKey1` through `ManiaModKey10` convert any non-mania beatmap to
+a mania beatmap of the selected column count. Because they are a
+conversion, they carry a **0.90× score multiplier** — separate from
+anything the std → mania path itself does.
 
-- **Visual audit vs lazer.** Side-by-side screenshots comparing note
-  height, hold body width, judgement line thickness, column colours,
-  hit lighting, judgement popups. Half a session. The mechanics audit
-  (docs/mechanics.md) is done; visuals are not.
+Reference: `osu.Game.Rulesets.Mania/Mods/ManiaKeyMod.cs`,
+`osu.Game.Rulesets.Mania/Scoring/ManiaScoreMultiplierCalculator.cs`.
 
-- **#19 — Miss sound cooldown.** Currently throttled to 1 per 150 ms.
-  Lazer has no throttle. Decide: match lazer (remove), or keep the
-  throttle for comfort. 3-line change.
+Key points:
+- Key mods are no-ops on **native mania maps**:
+  `if (mbc.IsForCurrentRuleset) return;` — the mod doesn't change the
+  map. Whether lazer still applies the multiplier in that case is not
+  fully clear; the calculator runs on the mod list, not on whether the
+  mod had an effect.
+- Score multiplier: **0.90×** (`new_key_mod_multiplier`). Was 1.0×
+  (`old_key_mod_multiplier`) until tachyon 2025.718.0 (2025-07-18,
+  ppy/osu#30506). Replays older than that get 1.0×.
+- Only one key mod can be active at a time — they are mutually
+  incompatible.
+- Ranked maps use the default column count (from the mod's own
+  `KeyCount`); any key count from 1 to 10 is allowed.
+- Converted maps display the Key mod's column count, not the source
+  map's natural key count.
 
-- **#20 — Result trigger timing.** Currently fires 2 s after
-  `last_note_end`. Lazer fires when all judgements resolve (miss windows
-  expire, holds release). Edge case: a hold whose tail extends past
-  `last_note_end` would fire the result before the tail judged.
-
-- **#21 — Sliding sample during hold.** Lazer loops the note's sliding
-  sample while held. We play the head sample once and stop. Cosmetic
-  but audible on long holds.
+**Not yet implemented in this client.** Port order when ready:
+1. `ManiaBeatmapConverter` with target column count from Key mod
+2. Score multiplier application at result time
+3. Converter pattern generators (hitcircle, slider, spinner)
 
 ## Low priority
+- Mods: DT / HT / HR. DT/HT change scroll_pps and audio rate
+  together; needs a "rate" concept in the audio stream too.
+- Score persistence: best score per (map, difficulty) in a local file
+- Better fonts (currently SDL's 8x8 debug font)
+- Custom hitsound banks per map (SampleSet / SampleIndex in .osu)
+- Std → mania converts
 
-- **Mods: DT / HT / HR.** DT/HT change scroll_pps and audio rate together;
-  needs a "rate" concept in the audio stream too. HR reshapes hit windows.
-- **Score persistence.** Best score per (map, difficulty) in a local file.
-- **Star rating display in song select.** Needs diffcalc (weeks).
-- **Better fonts.** Currently SDL's 8×8 debug font. stb_truetype would
-  also fix the row-text-masking problem in Medium priority.
-- **Result → song select button.** Currently tap = retry; only Esc goes back.
-- **On-screen restart button.** R key works today.
-- **Backup/shared audio.** Every song folder duplicates its hitsounds;
-  could share via files/skin/default/.
-- **Std → mania converts.** Design captured in the section below.
-- **Bar lines.** Cosmetic beat markers.
+## Lessons learned (read before your first patch)
+
+- **Build succeeded != installed.** `assembleDebug` writes an APK on the
+  host. The device keeps whatever was installed last. Always
+  `adb install -r` between build and test. This bit twice in one session.
+- **Never commit a patch you haven't built.** Brace imbalances and
+  declaration-order issues pass a text-diff review and fail the compiler
+  only when CMake actually reruns.
+- **Marker-anchored edits, not line indices.** Every off-by-one bug today
+  came from reasoning about line numbers from a printed snippet. Use
+  `src.count(marker) == N` assertions. The file shifts between patches;
+  markers don't.
+- **Verify every patch with grep on full context, not just the marker.**
+  The result-trigger fix shipped with its opening brace missing because
+  the post-patch `sed` dump showed only one line. Print the whole block.
+- **The `if (marker in src)` guard pattern is a trap.** If the marker
+  appears anywhere (including in a comment) the branch silently no-ops.
+  Use `src.count(marker) == expected_count`.
+- **Declare state variables at the top of `main()`**, before any lambda
+  captures them. `cfg_*`, `map_bank`, `last_miss_sound_tick`, and
+  `selected_index` all caused "undeclared identifier" errors when
+  placed later.
+- **scrcpy's `--keyboard=uhid` caps at 6 simultaneous keys.** It presents
+  a USB HID boot-protocol keyboard, whose report format has exactly 6
+  key slots. 7K charts with 6-note chords + a hold, or full 7-note chords,
+  will drop the 7th. Not our bug; a real USB keyboard via scrcpy's HID
+  shim has the same limit. Use an OTG keyboard with NKRO if testing those.
+- **scrcpy on Ubuntu 24.04 / Pop!_OS ships as 1.25 and crashes on Android 15**
+  (`NoSuchMethodException` on `SurfaceControl.createDisplay`). Purge it and
+  use the self-managed build in `~/Work/scrcpy/`; add to PATH via `~/.bashrc`.
 
 ## Notes
 - **FPS cap change requires restart** for vsync to toggle. In-app change
@@ -287,12 +517,13 @@ would need to become position-based, like lazer's
 NON-DESTRUCTIVE and is what we remove when the converter lands.
 
 Reference: ppy/osu ManiaBeatmapConverter.cs + Beatmaps/Patterns/Legacy/*
-- Key mods 4K–9K are ranked, 1K–3K and 10K are unranked.
-- Score multiplier: 0.90x (changed from 1.0x in Aug 2025, PR #30506).
-- Key mods only apply to converts, not native mania maps.
 - Converter is seeded from (DrainRate + CircleSize) * 20 +
   (int)(OD * 41.2) + round(AR) — deterministic output.
 - Density computed over last 7 notes; drives column distribution.
 - Port targets: SliderPatternGenerator.cs, SpinnerPatternGenerator.cs,
   and the base circle handler in the same folder.
-- Converted maps display 0.90x multiplier and use NK column count.
+
+**The std → mania conversion itself is 1.0× — it does NOT reduce score.**
+An unconverted std map played under mania rules scores the same as a
+native mania map of the same content. What reduces score is applying a
+**Key mod** on top of the conversion (see next section).
