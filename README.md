@@ -6,7 +6,7 @@ A minimal osu!mania client for Android, written in C++ with SDL3.
 
 ## Why
 
-osu!lazer on Android struggles to hold 60 FPS on mid-range hardware, not because the device is slow, but because the framework's per-frame update cost is heavy by design. A blank SDL3 + OpenGL ES loop on the same hardware runs at roughly **2000 FPS**. This project asks how much of that headroom a purpose-built mania client can use.
+osu!lazer on Android struggles to hold 60 FPS on mid-range hardware, not because the device is slow, but because the framework's per-frame update cost is heavy by design. A blank SDL3 + OpenGL ES loop on the same hardware runs at roughly **3000 FPS**. This project asks how much of that headroom a purpose-built mania client can use.
 
 ## Target
 
