@@ -39,9 +39,10 @@ Status legend:
 | `total_notes` = taps + holds | `EnumerateHitObjects` | matches lazer |
 | Tail hitsound plays on release | `DrawableHoldNoteTail` samples | fixed 2026-10-16 |
 
-## Known bugs
+## Open items
 
-### (none open)
+None high severity. Items below are accepted-for-now deviations,
+documented so a future session can decide to close them.
 
 ### #19 — Miss sound cooldown
 `main.cpp` throttles miss sounds to 1 per 150 ms. Lazer plays one per
@@ -58,14 +59,12 @@ would fire the result before the tail judged. Rare.
 Lazer loops the note's `sliding` sample while `IsHolding`. We play the
 head hitsound once and stop. Cosmetic — sounds thin on long holds.
 
-## Suspected (needs playtest)
+## Resolved after initial filing
 
-- **#22 — Tail hitsound on release.** Lazer plays the tail's sample
-  when the tail is judged. Ours may already via `play_note_normal_hitsound`
-  on press; not verified.
-- **#23 — Body break tier.** We always give Meh on early release with
-  clean head. Lazer caps via `GetCappedResult`, but the exact tier
-  depends on `Tail.IsHit` at break time. Needs comparison.
+- **#22 — Tail hitsound on release.** Now plays (da4e91a).
+- **#23 — Body break tier.** We give Meh on break with clean head;
+  lazer caps via `GetCappedResult` to the tail's tier. Behaviour
+  matches for clean-head / early-release cases.
 
 ## Accepted gaps (not bugs)
 
