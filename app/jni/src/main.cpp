@@ -482,6 +482,12 @@ int main(int argc, char* argv[]) {
 
     // OD-scaled miss window (matches lazer's HitWindows.miss_window)
     double od_miss_window = std::floor(od_window(map.od, 188.0, 173.0, 158.0)) + 0.5;
+    // Tail windows: lazer's DrawableHoldNoteTail applies RELEASE_WINDOW_LENIENCE
+    // (1.5x) on top of the regular hit windows.
+    double tw_p  = std::floor(od_window(map.od, 22.4, 19.4, 13.9) * 1.5) + 0.5;
+    double tw_g  = std::floor(od_window(map.od,  64.0,  49.0,  34.0) * 1.5) + 0.5;
+    double tw_gd = std::floor(od_window(map.od,  97.0,  82.0,  67.0) * 1.5) + 0.5;
+    double tw_ok = std::floor(od_window(map.od, 127.0, 112.0,  97.0) * 1.5) + 0.5;
 
     auto play_miss_sound = [&]() {
         Uint64 now = SDL_GetTicks();
@@ -1323,10 +1329,18 @@ int main(int argc, char* argv[]) {
                             }
                             play_miss_sound();
                         } else {
-                            // Released cleanly at/after tail — LN resolves
+                            // Released at/after tail — judge the tail now.
                             hold_active[hi]  = false;
                             note_judged[hi]  = true;
-                            // combo stays; tail is not a separate +1 in our scoring
+                            double d = now_map - map.notes[hi].end_time;
+                            double ta = d < 0 ? -d : d;
+                            if      (ta <= tw_p)  cnt_perfect++;
+                            else if (ta <= tw_g)  cnt_300++;
+                            else if (ta <= tw_gd) cnt_200++;
+                            else if (ta <= tw_ok) cnt_100++;
+                            else                  cnt_50++;
+                            combo++;
+                            if (combo > max_combo) max_combo = combo;
                         }
                         active_holds.erase(active_holds.begin() + i);
                     }
@@ -1464,6 +1478,11 @@ int main(int argc, char* argv[]) {
                     hold_active[hi]  = false;
                     note_judged[hi]  = true;
                     release_time[hi] = nmap;
+                    // Tail judged on completion. Lazer treats the tail as a
+                    // separate hit object; a hold-through resolves as Perfect.
+                    cnt_perfect++;
+                    combo++;
+                    if (combo > max_combo) max_combo = combo;
                     active_holds.erase(active_holds.begin() + i);
                 } else i++;
             }
