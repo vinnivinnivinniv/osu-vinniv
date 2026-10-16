@@ -32,8 +32,9 @@ Status legend:
 | Accuracy weights (Perfect = 305) | `ManiaScoreProcessor.GetBaseScoreForResult` | fixed 2026-10-16 (was 300) |
 | SS rank requires no Good/Ok/Meh/Miss | `ManiaScoreProcessor.RankFromScore` | fixed 2026-10-16 |
 | Touch→mouse synthesis disabled | `SDL_HINT_TOUCH_MOUSE_EVENTS` | fixed 2026-10-16; was double-judging per tap |
-| Hold body judgement (3 per hold) | `DrawableHoldNote.CheckForResult` | fixed 2026-10-16; was 2 per hold |
-| `total_notes` = taps + 3·holds | `EnumerateHitObjects` | fixed 2026-10-16 |
+| Hold judgement count: 2 per hold (head + tail) | `DrawableHoldNote` | 2026-10-16: initially misread as 3; body is internal state, not a scored judgement |
+| `total_notes` = taps + holds | `EnumerateHitObjects` | matches lazer |
+| Tail hitsound plays on release | `DrawableHoldNoteTail` samples | fixed 2026-10-16 |
 
 ## Known bugs
 
