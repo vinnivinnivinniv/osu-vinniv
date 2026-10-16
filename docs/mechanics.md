@@ -32,13 +32,16 @@ Status legend:
 | Accuracy weights (Perfect = 305) | `ManiaScoreProcessor.GetBaseScoreForResult` | fixed 2026-10-16 (was 300) |
 | SS rank requires no Good/Ok/Meh/Miss | `ManiaScoreProcessor.RankFromScore` | fixed 2026-10-16 |
 | Touch→mouse synthesis disabled | `SDL_HINT_TOUCH_MOUSE_EVENTS` | fixed 2026-10-16; was double-judging per tap |
+| Per-TP sampleSet (bank switches mid-map) | `SampleControlPoint` | fixed 2026-10-16 |
+| Press plays target-note sample | `GameplaySampleTriggerSource.Play` | fixed 2026-10-16; was map-wide default |
+| Tail sample resolves at end_time bank | `DrawableHoldNoteTail` samples | fixed 2026-10-16 |
 | Hold judgement count: 2 per hold (head + tail) | `DrawableHoldNote` | 2026-10-16: initially misread as 3; body is internal state, not a scored judgement |
 | `total_notes` = taps + holds | `EnumerateHitObjects` | matches lazer |
 | Tail hitsound plays on release | `DrawableHoldNoteTail` samples | fixed 2026-10-16 |
 
 ## Known bugs
 
-### (none currently open)
+### (none open)
 
 ### #19 — Miss sound cooldown
 `main.cpp` throttles miss sounds to 1 per 150 ms. Lazer plays one per
