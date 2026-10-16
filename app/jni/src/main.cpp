@@ -1326,19 +1326,24 @@ int main(int argc, char* argv[]) {
                             hold_broken[hi]  = true;
                             note_ghost[hi]   = true;
                             note_judged[hi]  = true;
-                            // On break, Tail.Result = Miss and Body.TriggerResult(
-                            // Tail.IsHit=false) = Miss. Head was scored at press.
-                            cnt_miss += 2;
+                            // Break: tail resolves as Meh if head hit, else Miss.
+                            // (Lazer's GetCappedResult caps the tail at Meh on
+                            // break; the head was already scored at press.)
+                            if (!hold_started[hi]) {
+                                cnt_miss++;
+                            } else {
+                                cnt_50++;
+                            }
                             combo = 0;
                             play_miss_sound();
                         } else {
-                            // Released in window. Lazer: Body.TriggerResult(
-                            // Tail.IsHit=true) -> Perfect; then tail tier from
+                            // Released in window — tail tier from
                             // |release - end_time| against 1.5x windows.
+                            // Head already scored at press.
                             hold_active[hi]  = false;
                             note_judged[hi]  = true;
-                            cnt_perfect++;   // body
-                            combo++;
+                            // Tail sample on release (lazer plays tail hitsound)
+                            play_note_normal_hitsound();
                             double d = now_map - map.notes[hi].end_time;
                             double ta = d < 0 ? -d : d;
                             if      (ta <= tw_p)  cnt_perfect++;
@@ -1485,10 +1490,19 @@ int main(int argc, char* argv[]) {
                     hold_active[hi]  = false;
                     note_judged[hi]  = true;
                     release_time[hi] = nmap;
-                    // Held through: body and tail both resolve as Perfect.
-                    // Head already scored at press time.
-                    cnt_perfect += 2;   // body + tail
-                    combo += 2;
+                    // Held through: tail resolves as Perfect. Head was
+                    // already scored at press. Lazer scores 2 per hold
+                    // (head + tail); body is internal state, not a
+                    // visible/scored judgement.
+                    //
+                    // Tail sample on completion. Most players release a
+                    // few frames after end_time, by which point this
+                    // block has already fired and cleared active_holds —
+                    // so the release handler won't see it. The sound
+                    // must play here, not (only) there.
+                    play_note_normal_hitsound();
+                    cnt_perfect++;
+                    combo++;
                     if (combo > max_combo) max_combo = combo;
                     active_holds.erase(active_holds.begin() + i);
                 } else i++;
@@ -1507,8 +1521,7 @@ int main(int argc, char* argv[]) {
                 }
                 note_ghost[i] = true;
                 note_judged[i] = true;
-                // Totally-missed hold = head + body + tail, all Miss. Tap = 1.
-                cnt_miss += is_hold_miss ? 3 : 1;
+                cnt_miss++;   // 1 miss regardless of tap/hold
                 combo = 0;
                 play_miss_sound();
             }
@@ -1757,9 +1770,9 @@ int main(int argc, char* argv[]) {
 
             // Score + accuracy
             long total_judged = (long)(cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss);
-            // Each hold is 3 judgements (head + body + tail).
-            // total = taps + 3*holds = map.notes.size() + 2*hold_count.
-            long total_notes  = (long)map.notes.size() + 2L * hold_count;
+            // Total judgements = taps + 2*holds (head + tail per hold).
+            // = map.notes.size() + hold_count.
+            long total_notes  = (long)map.notes.size() + (long)hold_count;
             double acc = 0.0;
             if (total_judged > 0) {
                 acc = (cnt_perfect*305.0 + cnt_300*300.0 + cnt_200*200.0
