@@ -459,6 +459,7 @@ int main(int argc, char* argv[]) {
     std::vector<double> note_hit_time(map.notes.size(), -1.0);
     bool  column_pressed[16] = {false};
     int   combo = 0, max_combo = 0;
+    int   hold_count = 0;   // taps + 3*holds for score formula
     int   cnt_perfect = 0, cnt_300 = 0, cnt_200 = 0;
     int   cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
@@ -1064,6 +1065,7 @@ int main(int argc, char* argv[]) {
                             active_holds.clear();
                             active_fingers.clear();
                             combo = 0; max_combo = 0;
+                            hold_count = 0;
                             cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
                             cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
                             miss_cursor = 0;
@@ -1077,8 +1079,10 @@ int main(int argc, char* argv[]) {
                                 rebuild_timing_positions();
 
                                 last_note_end = 0.0;
+                                hold_count = 0;
                                 for (const auto& n : map.notes) {
                                     if (n.end_time > last_note_end) last_note_end = n.end_time;
+                                    if (n.is_hold) hold_count++;
                                 }
                                 note_judged.assign(map.notes.size(),  false);
                                 note_hit_time.assign(map.notes.size(), -1.0);
@@ -1322,19 +1326,19 @@ int main(int argc, char* argv[]) {
                             hold_broken[hi]  = true;
                             note_ghost[hi]   = true;
                             note_judged[hi]  = true;
-                            // Tail result capped at Meh (matches GetCappedResult)
-                            if (!hold_started[hi]) {
-                                cnt_miss++;
-                                combo = 0;
-                            } else {
-                                cnt_50++;
-                                combo = 0;   // body break resets combo either way
-                            }
+                            // On break, Tail.Result = Miss and Body.TriggerResult(
+                            // Tail.IsHit=false) = Miss. Head was scored at press.
+                            cnt_miss += 2;
+                            combo = 0;
                             play_miss_sound();
                         } else {
-                            // Released at/after tail — judge the tail now.
+                            // Released in window. Lazer: Body.TriggerResult(
+                            // Tail.IsHit=true) -> Perfect; then tail tier from
+                            // |release - end_time| against 1.5x windows.
                             hold_active[hi]  = false;
                             note_judged[hi]  = true;
+                            cnt_perfect++;   // body
+                            combo++;
                             double d = now_map - map.notes[hi].end_time;
                             double ta = d < 0 ? -d : d;
                             if      (ta <= tw_p)  cnt_perfect++;
@@ -1481,10 +1485,10 @@ int main(int argc, char* argv[]) {
                     hold_active[hi]  = false;
                     note_judged[hi]  = true;
                     release_time[hi] = nmap;
-                    // Tail judged on completion. Lazer treats the tail as a
-                    // separate hit object; a hold-through resolves as Perfect.
-                    cnt_perfect++;
-                    combo++;
+                    // Held through: body and tail both resolve as Perfect.
+                    // Head already scored at press time.
+                    cnt_perfect += 2;   // body + tail
+                    combo += 2;
                     if (combo > max_combo) max_combo = combo;
                     active_holds.erase(active_holds.begin() + i);
                 } else i++;
@@ -1496,13 +1500,15 @@ int main(int argc, char* argv[]) {
                map.notes[miss_cursor].time < now_ms - od_miss_window) {
             size_t i = miss_cursor;
             if (!note_judged[i] && !hold_started[i]) {
-                if (map.notes[i].is_hold) {
+                bool is_hold_miss = map.notes[i].is_hold;
+                if (is_hold_miss) {
                     hold_broken[i] = true;
                     release_time[i] = now_ms;
                 }
                 note_ghost[i] = true;
                 note_judged[i] = true;
-                cnt_miss++;
+                // Totally-missed hold = head + body + tail, all Miss. Tap = 1.
+                cnt_miss += is_hold_miss ? 3 : 1;
                 combo = 0;
                 play_miss_sound();
             }
@@ -1751,7 +1757,9 @@ int main(int argc, char* argv[]) {
 
             // Score + accuracy
             long total_judged = (long)(cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss);
-            long total_notes  = (long)map.notes.size();
+            // Each hold is 3 judgements (head + body + tail).
+            // total = taps + 3*holds = map.notes.size() + 2*hold_count.
+            long total_notes  = (long)map.notes.size() + 2L * hold_count;
             double acc = 0.0;
             if (total_judged > 0) {
                 acc = (cnt_perfect*305.0 + cnt_300*300.0 + cnt_200*200.0
