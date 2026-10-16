@@ -1677,9 +1677,9 @@ int main(int argc, char* argv[]) {
                 int total = cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss;
                 double acc = 0.0;
                 if (total > 0)
-                    acc = (cnt_perfect*300.0 + cnt_300*300.0 + cnt_200*200.0
+                    acc = (cnt_perfect*305.0 + cnt_300*300.0 + cnt_200*200.0
                          + cnt_100*100.0 + cnt_50*50.0)
-                        / (total * 300.0) * 100.0;
+                        / (total * 305.0) * 100.0;
                 SDL_snprintf(buf, sizeof(buf), "Acc: %.2f%%   FPS: %d", acc, hud_fps);
                 SDL_RenderDebugText(renderer, (float)x, (float)y, buf);
 
@@ -1754,15 +1754,19 @@ int main(int argc, char* argv[]) {
             long total_notes  = (long)map.notes.size();
             double acc = 0.0;
             if (total_judged > 0) {
-                acc = (cnt_perfect*300.0 + cnt_300*300.0 + cnt_200*200.0
+                acc = (cnt_perfect*305.0 + cnt_300*300.0 + cnt_200*200.0
                      + cnt_100*100.0 + cnt_50*50.0)
-                    / (total_judged * 300.0) * 100.0;
+                    / (total_judged * 305.0) * 100.0;
             }
             long score = compute_lazer_score(cnt_perfect, cnt_300, cnt_200,
                                               cnt_100, cnt_50, (int)total_notes);
 
+            // Lazer ManiaScoreProcessor.RankFromScore: SS (X) iff base rank
+            // is S (>= 95% acc) AND no Good/Ok/Meh/Miss judgements exist.
+            bool any_imperfect = (cnt_200 > 0 || cnt_100 > 0 ||
+                                  cnt_50  > 0 || cnt_miss > 0);
             const char* rank = "D";
-            if      (acc >= 100.0) rank = "SS";
+            if      (acc >= 95.0 && !any_imperfect) rank = "SS";
             else if (acc >= 95.0)  rank = "S";
             else if (acc >= 90.0)  rank = "A";
             else if (acc >= 80.0)  rank = "B";
