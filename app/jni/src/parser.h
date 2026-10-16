@@ -21,6 +21,7 @@ struct TimingPoint {
     double beat_length = 500.0; // ms/beat from the active uninherited point
     bool   uninherited = true;
     double multiplier  = 1.0;   // Velocity * 1000 / beat_length (lazer's MulCP.Multiplier)
+    int    sample_set  = 0;     // field 3: 0=inherit [General], 1=normal, 2=soft, 3=drum
 };
 
 struct Beatmap {

@@ -21,6 +21,7 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
     // Timing-point state — persists across lines, updated as points are seen.
     double tp_cur_beat_length = 500.0;   // default 120 BPM until first uninherited
     double tp_cur_velocity    = 1.0;
+    int    tp_cur_sample_set  = 0;    // field 3; 0 = inherit [General] SampleSet
     if (!f.is_open()) {
         SDL_Log("parse_osu_file: cannot open %s", path.c_str());
         return false;
@@ -88,6 +89,12 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
             std::string p;
             while (std::getline(ss, p, ',')) parts.push_back(p);
             if (parts.size() >= 2) {
+                // Field 3 is per-TP sampleSet. 0 = inherit [General] SampleSet.
+                // Every TP line updates it; last-set value carries forward.
+                if (parts.size() >= 4 && !parts[3].empty()) {
+                    try { tp_cur_sample_set = std::stoi(parts[3]); }
+                    catch (...) { /* leave previous value */ }
+                }
                 try {
                     double tp_time  = std::stod(parts[0]);
                     double beat_len = std::stod(parts[1]);
@@ -103,6 +110,7 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
                     tp.time        = tp_time;
                     tp.beat_length = tp_cur_beat_length;
                     tp.uninherited = uninherited;
+                    tp.sample_set  = tp_cur_sample_set;
                     tp.multiplier  = tp_cur_velocity * 1000.0 / tp_cur_beat_length;
                     out.timing_points.push_back(tp);
                 } catch (...) {}

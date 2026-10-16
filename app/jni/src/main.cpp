@@ -523,8 +523,55 @@ int main(int argc, char* argv[]) {
     // Per-map hitsound bank (loaded when a song starts)
     MapSampleBank map_bank;
 
-    auto play_note_normal_hitsound = [&]() {
-        int bank = (map.sample_set > 0 ? map.sample_set : 2);
+    // Bank resolver: sampleSet from the last timing point at or before t.
+    // Matches lazer's SampleControlPoint lookup: each TP's sampleSet applies
+    // from its own time until the next TP. Returns 1/2/3; 0 and out-of-range
+    // fall back to [General] SampleSet, then to 2 (soft).
+    auto bank_at_time = [&](double t) -> int {
+        const auto& tps = map.timing_points;
+        int best = -1;
+        int lo = 0, hi = (int)tps.size() - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (tps[mid].time <= t) { best = mid; lo = mid + 1; }
+            else                    { hi = mid - 1; }
+        }
+        int bank = (best >= 0) ? tps[best].sample_set : 0;
+        if (bank == 0) bank = map.sample_set;
+        if (bank == 0) bank = 2;
+        return bank;
+    };
+
+    // Press sound. Mirrors lazer's GameplaySampleTriggerSource.Play():
+    // find the earliest unjudged note in the column, or the last judged
+    // one if the column is fully resolved, or nothing if the column is
+    // empty. Bank resolves at the target note's time (not now_ms).
+    auto play_press_sound = [&](int col) {
+        int target_i = -1;
+        for (size_t i = 0; i < map.notes.size(); i++) {
+            if (map.notes[i].column != col) continue;
+            if (!note_judged[i]) { target_i = (int)i; break; }
+        }
+        if (target_i < 0) {
+            for (size_t i = map.notes.size(); i-- > 0; ) {
+                if (map.notes[i].column == col) { target_i = (int)i; break; }
+            }
+        }
+        if (target_i < 0) return;   // column has no notes at all
+        int bank = map.notes[target_i].sample_bank;
+        if (bank == 0) bank = bank_at_time(map.notes[target_i].time);
+        const char* bank_name = "soft";
+        if      (bank == 1) bank_name = "normal";
+        else if (bank == 3) bank_name = "drum";
+        char buf[64];
+        SDL_snprintf(buf, sizeof(buf), "%s-hitnormal.wav", bank_name);
+        if (!map_bank.play(buf, cfg_hitsound_vol, true))
+            play_sound(hit_stream, hit_data, hit_len);
+    };
+
+    // Tail sound helper — resolves bank at a given time.
+    auto play_tail_sound = [&](double end_time) {
+        int bank = bank_at_time(end_time);
         const char* bank_name = "soft";
         if      (bank == 1) bank_name = "normal";
         else if (bank == 3) bank_name = "drum";
@@ -607,7 +654,11 @@ int main(int argc, char* argv[]) {
         //     else the normal bank)
         {
             int bits = map.notes[best_i].hit_sound;
+            // Resolve banks: explicit per-note value wins; else bank_at_time
+            // at the note's own time. Mirrors lazer's SampleControlPoint
+            // lookup when the note's bank field is null.
             int note_bank_norm = map.notes[best_i].sample_bank;
+            if (note_bank_norm == 0) note_bank_norm = bank_at_time(map.notes[best_i].time);
             int note_bank_add  = map.notes[best_i].sample_bank_addition;
             if (note_bank_add == 0) note_bank_add = note_bank_norm;  // inherit
             const std::string& note_suffix = map.notes[best_i].sample_suffix;
@@ -976,7 +1027,7 @@ int main(int argc, char* argv[]) {
                 }
                 if (col >= 0 && col < keys) {
                     column_pressed[col] = true;
-                    play_note_normal_hitsound();
+                    play_press_sound(col);
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -1296,7 +1347,7 @@ int main(int argc, char* argv[]) {
                     active_fingers.push_back({ e.tfinger.fingerID, col });
                 finger_done:
                     column_pressed[col] = true;
-                    play_note_normal_hitsound();
+                    play_press_sound(col);
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -1368,8 +1419,8 @@ int main(int argc, char* argv[]) {
                             // Head already scored at press.
                             hold_active[hi]  = false;
                             note_judged[hi]  = true;
-                            // Tail sample on release (lazer plays tail hitsound)
-                            play_note_normal_hitsound();
+                            // Tail sample on release. Bank resolves at end_time.
+                            play_tail_sound(map.notes[hi].end_time);
                             double d = now_map - map.notes[hi].end_time;
                             double ta = d < 0 ? -d : d;
                             if      (ta <= tw_p)  cnt_perfect++;
@@ -1388,7 +1439,7 @@ int main(int argc, char* argv[]) {
                 int col = find_col(e.button.x);
                 if (col >= 0) {
                     column_pressed[col] = true;
-                    play_note_normal_hitsound();
+                    play_press_sound(col);
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
@@ -1521,12 +1572,10 @@ int main(int argc, char* argv[]) {
                     // (head + tail); body is internal state, not a
                     // visible/scored judgement.
                     //
-                    // Tail sample on completion. Most players release a
-                    // few frames after end_time, by which point this
-                    // block has already fired and cleared active_holds —
-                    // so the release handler won't see it. The sound
-                    // must play here, not (only) there.
-                    play_note_normal_hitsound();
+                    // Tail sample on completion (the usual path — players
+                    // release a few frames after end_time). Bank resolves
+                    // at end_time.
+                    play_tail_sound(map.notes[hi].end_time);
                     cnt_perfect++;
                     combo++;
                     if (combo > max_combo) max_combo = combo;
