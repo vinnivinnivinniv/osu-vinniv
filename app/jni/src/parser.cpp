@@ -190,6 +190,12 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
                         try { n.sample_bank = std::stoi(hparts[0]); }
                         catch (...) { n.sample_bank = 0; }
                     }
+                    // Field [1] is the addition-bank: separate from the
+                    // normal bank. If empty, additions inherit from field [0].
+                    if (hparts.size() >= 2 && !hparts[1].empty()) {
+                        try { n.sample_bank_addition = std::stoi(hparts[1]); }
+                        catch (...) { n.sample_bank_addition = 0; }
+                    }
                     if (hparts.size() >= 3) n.sample_suffix = hparts[2];
                     if (hparts.size() >= 4 && !hparts[3].empty()) {
                         try { n.sample_volume = std::stoi(hparts[3]); }

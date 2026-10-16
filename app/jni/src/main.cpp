@@ -534,19 +534,31 @@ int main(int argc, char* argv[]) {
             play_sound(hit_stream, hit_data, hit_len);
     };
 
+    // Resolve and play a hitsound sample. Order matches lazer's
+    // HitSampleInfo.LookupNames:
+    //   1. bank-name<suffix>  (only when custom index >= 2)
+    //   2. bank-name
+    //   3. name               (bare-name fallback)
+    // If filename is set on the note, that overrides everything.
     auto play_note_sample = [&](int bank, const char* addition,
                                  const std::string& suffix, int volume) -> bool {
         if (bank == 0) bank = (map.sample_set > 0 ? map.sample_set : 2);
         const char* bank_name = "soft";
         if      (bank == 1) bank_name = "normal";
         else if (bank == 3) bank_name = "drum";
+        // Lazer only appends a suffix when customSampleBank >= 2.
+        // Index 0 and 1 mean "use the un-suffixed filename".
+        int idx = 0;
+        if (!suffix.empty()) { try { idx = std::stoi(suffix); } catch (...) {} }
         char buf[160];
-        if (!suffix.empty())
-            SDL_snprintf(buf, sizeof(buf), "%s-%s%s.wav",
-                         bank_name, addition, suffix.c_str());
-        else
-            SDL_snprintf(buf, sizeof(buf), "%s-%s.wav", bank_name, addition);
         float gain = volume > 0 ? (volume / 100.0f) * cfg_hitsound_vol : cfg_hitsound_vol;
+        if (idx >= 2) {
+            SDL_snprintf(buf, sizeof(buf), "%s-%s%d.wav", bank_name, addition, idx);
+            if (map_bank.play(buf, gain, true)) return true;
+        }
+        SDL_snprintf(buf, sizeof(buf), "%s-%s.wav", bank_name, addition);
+        if (map_bank.play(buf, gain, true)) return true;
+        SDL_snprintf(buf, sizeof(buf), "%s.wav", addition);
         return map_bank.play(buf, gain, true);
     };
 
@@ -588,19 +600,33 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        // Layered extras from the note's hitSound bitfield, resolved against
-        // the map's own hitsound bank if it ships one.
+        // Layered extras. Lazer's ConvertHitObjectParser.convertSoundType:
+        //   - if Filename is set, it replaces the hitnormal slot only,
+        //     and additions still layer on top
+        //   - additions use BankForAdditions (= additionBank if set,
+        //     else the normal bank)
         {
             int bits = map.notes[best_i].hit_sound;
-            int note_bank = map.notes[best_i].sample_bank;
+            int note_bank_norm = map.notes[best_i].sample_bank;
+            int note_bank_add  = map.notes[best_i].sample_bank_addition;
+            if (note_bank_add == 0) note_bank_add = note_bank_norm;  // inherit
             const std::string& note_suffix = map.notes[best_i].sample_suffix;
             int note_vol = map.notes[best_i].sample_volume;
+            const std::string& note_file = map.notes[best_i].sample_filename;
 
-            if ((bits & 8) && !play_note_sample(note_bank, "hitclap", note_suffix, note_vol))
+            // Filename override applies to hitnormal only.
+            if (!note_file.empty()) {
+                float gain = note_vol > 0 ? (note_vol / 100.0f) * cfg_hitsound_vol
+                                          : cfg_hitsound_vol;
+                if (!map_bank.play(note_file, gain, true))
+                    play_sound(hit_stream, hit_data, hit_len);
+            }
+
+            if ((bits & 8) && !play_note_sample(note_bank_add, "hitclap",    note_suffix, note_vol))
                 play_sound(clap_stream, clap_data, clap_len);
-            if ((bits & 2) && !play_note_sample(note_bank, "hitwhistle", note_suffix, note_vol))
+            if ((bits & 2) && !play_note_sample(note_bank_add, "hitwhistle", note_suffix, note_vol))
                 play_sound(whistle_stream, whistle_data, whistle_len);
-            if ((bits & 4) && !play_note_sample(note_bank, "hitfinish", note_suffix, note_vol))
+            if ((bits & 4) && !play_note_sample(note_bank_add, "hitfinish",  note_suffix, note_vol))
                 play_sound(finish_stream, finish_data, finish_len);
         }
 

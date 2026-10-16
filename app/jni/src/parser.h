@@ -8,8 +8,9 @@ struct Note {
     double time;      // ms
     bool is_hold;
     int  hit_sound;   // bitfield: 1=normal, 2=whistle, 4=finish, 8=clap
-    int  sample_bank; // 0=auto, 1=normal, 2=soft, 3=drum (from field 6)
-    std::string sample_suffix;  // custom suffix from field 6
+    int  sample_bank; // 0=auto, 1=normal, 2=soft, 3=drum (for hitnormal)
+    int  sample_bank_addition = 0;  // 0=inherit from sample_bank; else 1/2/3
+    std::string sample_suffix;  // custom sample index from field 6, "" if none
     int  sample_volume;         // 0-100, 0 = default
     std::string sample_filename; // full override from field 6, empty if none
     double end_time;  // ms, equals time for taps
