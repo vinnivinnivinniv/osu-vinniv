@@ -97,7 +97,10 @@ int main(int argc, char* argv[]) {
     // Write bundled default sounds to the files dir on first launch
     ensure_bundled_sounds("/sdcard/Android/data/sh.ppy.osuvinniv/files");
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
-    // SDL_HINT_TOUCH_MOUSE_EVENTS disabled: we handle FINGER_DOWN/UP directly for multi-touch
+    // Disable touch-to-mouse synthesis so a single tap does not fire both
+    // FINGER_DOWN and MOUSE_BUTTON_DOWN (which double-judged gameplay notes).
+    // All UI touch handling uses SDL_EVENT_FINGER_* directly.
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
