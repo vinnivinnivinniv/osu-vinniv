@@ -201,6 +201,13 @@ std::vector<SongEntry> scan_songs(const std::string& root,
     std::vector<SongEntry> cached;
     if (load_song_cache(cache_path, root_mtime, cached)) {
         SDL_Log("CACHE: loaded %zu entries", cached.size());
+        // Cache file is written before the cold-path sort, so it holds
+        // scan order. Sort here so warm loads match cold loads.
+        std::sort(cached.begin(), cached.end(), [](const SongEntry& a, const SongEntry& b) {
+            if (a.title  != b.title)  return a.title  < b.title;
+            if (a.artist != b.artist) return a.artist < b.artist;
+            return a.version < b.version;
+        });
         return cached;
     }
 
@@ -276,9 +283,10 @@ std::vector<SongEntry> scan_songs(const std::string& root,
     save_song_cache(cache_path, root_mtime, out);
     SDL_Log("CACHE: saved %zu entries", out.size());
 
+    // Primary sort: title (lazer default), then artist, then difficulty.
     std::sort(out.begin(), out.end(), [](const SongEntry& a, const SongEntry& b) {
-        if (a.artist != b.artist) return a.artist < b.artist;
         if (a.title  != b.title)  return a.title  < b.title;
+        if (a.artist != b.artist) return a.artist < b.artist;
         return a.version < b.version;
     });
 
