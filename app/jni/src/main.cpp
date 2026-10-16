@@ -80,6 +80,69 @@ static long compute_lazer_score(int perfect, int great, int good, int ok, int me
     return (long)score;
 }
 
+// Per-sample-name audio pool. Matches lazer's OsuGameBase.SAMPLE_CONCURRENCY
+// model: up to 6 overlapping channels per sample name; further play requests
+// while all 6 are active are silently dropped. No time-based throttle.
+struct SamplePool {
+    static constexpr int N = 6;   // lazer SAMPLE_CONCURRENCY
+    SDL_AudioStream* channels[N] = {};
+    Uint64           started_at_ms[N] = {};
+    Uint32           dur_ms = 100;      // sample duration, for free-slot check
+    Uint8*           data = nullptr;
+    Uint32           len  = 0;
+    int              next = 0;
+
+    bool init(const char* path) {
+        SDL_AudioSpec spec = {};
+        if (!load_audio_to_pcm(path, &spec, &data, &len)) return false;
+        int bpf  = SDL_AUDIO_BYTESIZE(spec.format) * spec.channels;
+        int bpms = spec.freq * bpf / 1000;
+        dur_ms = bpms > 0 ? (len / bpms) : 100;
+        for (int i = 0; i < N; i++) {
+            channels[i] = SDL_OpenAudioDeviceStream(
+                SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+            if (channels[i]) SDL_ResumeAudioStreamDevice(channels[i]);
+        }
+        return channels[0] != nullptr;
+    }
+
+    bool play(float gain) {
+        if (!data || !len || !channels[0]) return false;
+        Uint64 now = SDL_GetTicks();
+        int slot = -1;
+        for (int i = 0; i < N; i++) {
+            int idx = (next + i) % N;
+            if (now - started_at_ms[idx] >= dur_ms) { slot = idx; break; }
+        }
+        if (slot < 0) return false;   // pool exhausted — drop, matching lazer
+        SDL_ClearAudioStream(channels[slot]);
+        SDL_SetAudioStreamGain(channels[slot], gain);
+        SDL_PutAudioStreamData(channels[slot], data, (int)len);
+        SDL_ResumeAudioStreamDevice(channels[slot]);
+        started_at_ms[slot] = now;
+        next = (slot + 1) % N;
+        return true;
+    }
+
+    void clear_all() {
+        for (int i = 0; i < N; i++) {
+            if (channels[i]) SDL_ClearAudioStream(channels[i]);
+            started_at_ms[i] = 0;
+        }
+    }
+
+    void set_gain(float g) {
+        for (int i = 0; i < N; i++)
+            if (channels[i]) SDL_SetAudioStreamGain(channels[i], g);
+    }
+
+    ~SamplePool() {
+        for (int i = 0; i < N; i++)
+            if (channels[i]) SDL_DestroyAudioStream(channels[i]);
+        if (data) SDL_free(data);
+    }
+};
+
 // osu!mania scroll speed -> pixels per millisecond.
 // From osu source: timeRange = MAX_TIME_RANGE / speed, with speed 1.0-40.0.
 // The visible playfield height corresponds to that time range.
@@ -307,72 +370,32 @@ int main(int argc, char* argv[]) {
         SDL_Log("AUDIO: load failed: %s", SDL_GetError());
     }
 
-    // Hitsound stream
-    SDL_AudioSpec hit_spec = {};
-    Uint8*  hit_data = nullptr;
-    Uint32  hit_len  = 0;
-    SDL_AudioStream* hit_stream = nullptr;
-    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/hit.ogg",
-                    &hit_spec, &hit_data, &hit_len)) {
-        SDL_Log("HIT: loaded %d Hz, %d ch, %u bytes",
-                hit_spec.freq, hit_spec.channels, hit_len);
-        hit_stream = SDL_OpenAudioDeviceStream(
-            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &hit_spec, nullptr, nullptr);
-        if (hit_stream) {
-            SDL_SetAudioStreamGain(hit_stream, cfg_hitsound_vol);
-            SDL_ResumeAudioStreamDevice(hit_stream);
-        }
-        else SDL_Log("HIT: stream open failed: %s", SDL_GetError());
-    } else {
-        SDL_Log("HIT: load failed: %s", SDL_GetError());
-    }
-
-    SDL_AudioSpec miss_spec = {};
-    Uint8*  miss_data = nullptr;
-    Uint32  miss_len  = 0;
-    SDL_AudioStream* miss_stream = nullptr;
-    if (load_audio_to_pcm("/sdcard/Android/data/sh.ppy.osuvinniv/files/miss.ogg",
-                    &miss_spec, &miss_data, &miss_len)) {
-        SDL_Log("MISS: loaded %d Hz, %u bytes", miss_spec.freq, miss_len);
-        miss_stream = SDL_OpenAudioDeviceStream(
-            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &miss_spec, nullptr, nullptr);
-        if (miss_stream) {
-            SDL_SetAudioStreamGain(miss_stream, cfg_hitsound_vol);
-            SDL_ResumeAudioStreamDevice(miss_stream);
-        }
-    } else {
-        SDL_Log("MISS: load failed: %s", SDL_GetError());
-    }
-
-    SDL_AudioStream* clap_stream    = nullptr;
-    Uint8*           clap_data      = nullptr;
-    Uint32           clap_len       = 0;
-    SDL_AudioStream* whistle_stream = nullptr;
-    Uint8*           whistle_data   = nullptr;
-    Uint32           whistle_len    = 0;
-    SDL_AudioStream* finish_stream  = nullptr;
-    Uint8*           finish_data    = nullptr;
-    Uint32           finish_len     = 0;
+    // Hitsound pools. Lazer's SAMPLE_CONCURRENCY = 6: up to 6 overlapping
+    // channels per sample name; requests while all 6 are active are silently
+    // dropped. Replaces the old 150 ms time throttle on the miss sound.
+    SamplePool hit_pool;
+    SamplePool miss_pool;
+    SamplePool clap_pool;
+    SamplePool whistle_pool;
+    SamplePool finish_pool;
     {
-        struct Extra { SDL_AudioStream** s; Uint8** d; Uint32* l; const char* name; };
-        Extra extras[] = {
-            { &clap_stream,    &clap_data,    &clap_len,    "clap" },
-            { &whistle_stream, &whistle_data, &whistle_len, "whistle" },
-            { &finish_stream,  &finish_data,  &finish_len,  "finish" },
+        struct PoolInit { SamplePool* p; const char* name; };
+        PoolInit inits[] = {
+            { &hit_pool,     "hit" },
+            { &miss_pool,    "miss" },
+            { &clap_pool,    "clap" },
+            { &whistle_pool, "whistle" },
+            { &finish_pool,  "finish" },
         };
-        for (auto& e : extras) {
+        for (auto& pi : inits) {
             char path[128];
             SDL_snprintf(path, sizeof(path),
-                "/sdcard/Android/data/sh.ppy.osuvinniv/files/%s.ogg", e.name);
-            SDL_AudioSpec spec = {};
-            if (load_audio_to_pcm(path, &spec, e.d, e.l)) {
-                *e.s = SDL_OpenAudioDeviceStream(
-                    SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
-                if (*e.s) {
-                    SDL_SetAudioStreamGain(*e.s, cfg_hitsound_vol);
-                    SDL_ResumeAudioStreamDevice(*e.s);
-                    SDL_Log("EXTRA: loaded %s", e.name);
-                }
+                "/sdcard/Android/data/sh.ppy.osuvinniv/files/%s.ogg", pi.name);
+            if (pi.p->init(path)) {
+                pi.p->set_gain(cfg_hitsound_vol);
+                SDL_Log("POOL: %s loaded (%u bytes, %d ch)", pi.name, pi.p->len, SamplePool::N);
+            } else {
+                SDL_Log("POOL: %s load failed", pi.name);
             }
         }
     }
@@ -475,7 +498,6 @@ int main(int argc, char* argv[]) {
     std::vector<FingerSlot> active_fingers;
     active_fingers.reserve(10);
 
-    Uint64 last_miss_sound_tick = 0;   // miss-sound cooldown
 
     // Latest end time across all notes — what actually determines "song done".
     // notes.back() has the latest head time, not necessarily the latest tail.
@@ -494,20 +516,9 @@ int main(int argc, char* argv[]) {
     double tw_ok = std::floor(od_window(map.od, 127.0, 112.0,  97.0) * 1.5) + 0.5;
 
     auto play_miss_sound = [&]() {
-        Uint64 now = SDL_GetTicks();
-        // Cooldown so a burst of misses doesn't spam the blip.
-        if (now - last_miss_sound_tick < 150) return;
-        last_miss_sound_tick = now;
-        if (miss_stream && miss_data)
-            SDL_PutAudioStreamData(miss_stream, miss_data, (int)miss_len);
-    };
-
-    auto play_sound = [](SDL_AudioStream* s, Uint8* data, Uint32 len) {
-        if (!s || !data) return;
-        // Kill any queued samples so the newest press wins instead of
-        // stacking into a backlog. Matches the "override" feel.
-        SDL_ClearAudioStream(s);
-        SDL_PutAudioStreamData(s, data, (int)len);
+        // Lazer: 6-slot concurrency pool per sample name. Silent drop when
+        // the pool is exhausted. No time-based throttle.
+        miss_pool.play(cfg_hitsound_vol);
     };
 
     auto find_col = [&](float x) -> int {
@@ -566,7 +577,7 @@ int main(int argc, char* argv[]) {
         char buf[64];
         SDL_snprintf(buf, sizeof(buf), "%s-hitnormal.wav", bank_name);
         if (!map_bank.play(buf, cfg_hitsound_vol, true))
-            play_sound(hit_stream, hit_data, hit_len);
+            hit_pool.play(cfg_hitsound_vol);
     };
 
     // Tail sound helper — resolves bank at a given time.
@@ -578,7 +589,7 @@ int main(int argc, char* argv[]) {
         char buf[64];
         SDL_snprintf(buf, sizeof(buf), "%s-hitnormal.wav", bank_name);
         if (!map_bank.play(buf, cfg_hitsound_vol, true))
-            play_sound(hit_stream, hit_data, hit_len);
+            hit_pool.play(cfg_hitsound_vol);
     };
 
     // Resolve and play a hitsound sample. Order matches lazer's
@@ -670,15 +681,15 @@ int main(int argc, char* argv[]) {
                 float gain = note_vol > 0 ? (note_vol / 100.0f) * cfg_hitsound_vol
                                           : cfg_hitsound_vol;
                 if (!map_bank.play(note_file, gain, true))
-                    play_sound(hit_stream, hit_data, hit_len);
+                    hit_pool.play(cfg_hitsound_vol);
             }
 
             if ((bits & 8) && !play_note_sample(note_bank_add, "hitclap",    note_suffix, note_vol))
-                play_sound(clap_stream, clap_data, clap_len);
+                clap_pool.play(cfg_hitsound_vol);
             if ((bits & 2) && !play_note_sample(note_bank_add, "hitwhistle", note_suffix, note_vol))
-                play_sound(whistle_stream, whistle_data, whistle_len);
+                whistle_pool.play(cfg_hitsound_vol);
             if ((bits & 4) && !play_note_sample(note_bank_add, "hitfinish",  note_suffix, note_vol))
-                play_sound(finish_stream, finish_data, finish_len);
+                finish_pool.play(cfg_hitsound_vol);
         }
 
         if (map.notes[best_i].is_hold) {
@@ -1009,8 +1020,8 @@ int main(int argc, char* argv[]) {
                     SDL_ClearAudioStream(audio_stream);
                     SDL_PauseAudioStreamDevice(audio_stream);
                 }
-                if (hit_stream)  SDL_ClearAudioStream(hit_stream);
-                if (miss_stream) SDL_ClearAudioStream(miss_stream);
+                hit_pool.clear_all();
+                miss_pool.clear_all();
                 audio_queued = false;
                 audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
@@ -1329,8 +1340,8 @@ int main(int argc, char* argv[]) {
                                 SDL_ClearAudioStream(audio_stream);
                                 SDL_PauseAudioStreamDevice(audio_stream);
                             }
-                            if (hit_stream)  SDL_ClearAudioStream(hit_stream);
-                            if (miss_stream) SDL_ClearAudioStream(miss_stream);
+                            hit_pool.clear_all();
+                            miss_pool.clear_all();
                             audio_queued = false;
                             audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
@@ -1550,11 +1561,11 @@ int main(int argc, char* argv[]) {
         if (settings_dirty) {
             settings_dirty = false;
             if (audio_stream)         SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
-            if (hit_stream)           SDL_SetAudioStreamGain(hit_stream, cfg_hitsound_vol);
-            if (miss_stream)          SDL_SetAudioStreamGain(miss_stream, cfg_hitsound_vol);
-            if (clap_stream)          SDL_SetAudioStreamGain(clap_stream, cfg_hitsound_vol);
-            if (whistle_stream)       SDL_SetAudioStreamGain(whistle_stream, cfg_hitsound_vol);
-            if (finish_stream)        SDL_SetAudioStreamGain(finish_stream, cfg_hitsound_vol);
+            hit_pool.set_gain(cfg_hitsound_vol);
+            miss_pool.set_gain(cfg_hitsound_vol);
+            clap_pool.set_gain(cfg_hitsound_vol);
+            whistle_pool.set_gain(cfg_hitsound_vol);
+            finish_pool.set_gain(cfg_hitsound_vol);
             if (countdown_sfx_stream) SDL_SetAudioStreamGain(countdown_sfx_stream, cfg_hitsound_vol);
         }
 
@@ -2303,18 +2314,9 @@ int main(int argc, char* argv[]) {
 
     if (audio_stream) SDL_DestroyAudioStream(audio_stream);
     if (wav_data)     SDL_free(wav_data);
-    if (hit_stream)   SDL_DestroyAudioStream(hit_stream);
-    if (hit_data)     SDL_free(hit_data);
-    if (miss_stream)  SDL_DestroyAudioStream(miss_stream);
-    if (miss_data)    SDL_free(miss_data);
     if (countdown_sfx_stream) SDL_DestroyAudioStream(countdown_sfx_stream);
     if (cd_data)              SDL_free(cd_data);
-    if (clap_stream)    SDL_DestroyAudioStream(clap_stream);
-    if (clap_data)      SDL_free(clap_data);
-    if (whistle_stream) SDL_DestroyAudioStream(whistle_stream);
-    if (whistle_data)   SDL_free(whistle_data);
-    if (finish_stream)  SDL_DestroyAudioStream(finish_stream);
-    if (finish_data)    SDL_free(finish_data);
+    // hit/miss/clap/whistle/finish pools free themselves on scope exit.
     if (hud_tex) SDL_DestroyTexture(hud_tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
