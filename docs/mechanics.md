@@ -32,12 +32,27 @@ Status legend:
 | Accuracy weights (Perfect = 305) | `ManiaScoreProcessor.GetBaseScoreForResult` | fixed 2026-10-16 (was 300) |
 | SS rank requires no Good/Ok/Meh/Miss | `ManiaScoreProcessor.RankFromScore` | fixed 2026-10-16 |
 | Touch→mouse synthesis disabled | `SDL_HINT_TOUCH_MOUSE_EVENTS` | fixed 2026-10-16; was double-judging per tap |
-| Hold body judgement (3 per hold) | `DrawableHoldNote.CheckForResult` | fixed 2026-10-16; was 2 per hold |
-| `total_notes` = taps + 3·holds | `EnumerateHitObjects` | fixed 2026-10-16 |
 
 ## Known bugs
 
-### (none currently open)
+### #17 — Hold body judgement missing
+**Severity: high.** Lazer scores three judgements per hold: Head + Body
++ Tail. We score two.
+
+Impact:
+- Combo per clean hold: lazer +3, ours +2
+- Accuracy on broken holds: lazer `305/915 = 33.3%`, ours `305/610 = 50%`
+- `total_notes` in the score formula is short by `hold_count`
+
+Rule (`DrawableHoldNote.CheckForResult`):
+    if (!Body.AllJudged)
+        Body.TriggerResult(Tail.IsHit);   // Perfect if tail non-Miss, else Miss
+
+Fix scope:
+1. Compute `hold_count` on map load
+2. `total_notes = tap_count + 3 * hold_count`
+3. `cnt_perfect++` + `combo++` on clean tail resolution
+4. `cnt_miss++` + combo reset on tail-miss
 
 ### #19 — Miss sound cooldown
 `main.cpp` throttles miss sounds to 1 per 150 ms. Lazer plays one per
