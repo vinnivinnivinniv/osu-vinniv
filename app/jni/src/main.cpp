@@ -1042,12 +1042,33 @@ int main(int argc, char* argv[]) {
                     SDL_Log("SETTINGS: open (pre-scan)");
                     continue;
                 }
+                // Random button (below settings)
+                if (bstx >= 40.0f && bstx <= 280.0f &&
+                    bsty >= 240.0f && bsty <= 320.0f) {
+                    if (!songs.empty()) {
+                        static bool rng_seeded = false;
+                        if (!rng_seeded) { srand((unsigned)SDL_GetTicks()); rng_seeded = true; }
+                        selected_index = (int)(rand() % (int)songs.size());
+                        ListGeom lg_r = get_list_geom();
+                        float row_top = selected_index * lg_r.row_h;
+                        float row_bot = row_top + lg_r.row_h;
+                        if (row_top < song_scroll) song_scroll = row_top;
+                        else if (row_bot > song_scroll + lg_r.h) song_scroll = row_bot - lg_r.h;
+                        if (song_scroll < 0.0f) song_scroll = 0.0f;
+                        float total_h = (float)songs.size() * lg_r.row_h;
+                        float max_s = total_h > lg_r.h ? total_h - lg_r.h : 0.0f;
+                        if (song_scroll > max_s) song_scroll = max_s;
+                        SDL_Log("SONGS: random -> %d", selected_index);
+                    }
+                    continue;
+                }
             }
             // SONG SELECT DRAG / TAP
             if (app_state == AppState::SongSelect && !songs.empty()) {
                 ListGeom lg = get_list_geom();
                 const float list_x = lg.x;
                 const float list_y = lg.y;
+                const float list_w = lg.w;
                 const float row_h  = lg.row_h;
                 const float list_h = lg.h;
                 const float total_h = (float)songs.size() * row_h;
@@ -1112,9 +1133,11 @@ int main(int argc, char* argv[]) {
                     }
                     settings_btn_candidate = false;
                     if (!song_drag_moved) {
+                        float tx = e.tfinger.x * (float)win_w;
                         float ty = e.tfinger.y * (float)win_h;
-                        // Reject taps outside the visible list viewport.
+                        // Reject taps outside the list viewport (both axes).
                         if (ty < list_y || ty > list_y + list_h) continue;
+                        if (tx < list_x || tx > list_x + list_w) continue;
                         int hit = (int)((ty - list_y + song_scroll) / row_h);
                         if (hit >= 0 && hit < (int)songs.size()) {
                             // Tap UX: first tap selects (and previews bg),
@@ -2095,6 +2118,29 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderScale(renderer, 1.0f, 1.0f);
             }
 
+            // Random button (upper-left, below settings)
+            {
+                const float bx = 40.0f;
+                const float by = 240.0f;
+                const float bw = 240.0f;
+                const float bh = 80.0f;
+
+                SDL_SetRenderDrawColor(renderer, 40, 50, 70, 255);
+                SDL_FRect bg = { bx, by, bw, bh };
+                SDL_RenderFillRect(renderer, &bg);
+
+                SDL_SetRenderDrawColor(renderer, 100, 200, 100, 255);
+                SDL_RenderRect(renderer, &bg);
+
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                SDL_SetRenderDrawColor(renderer, 180, 240, 180, 255);
+                float text_w_px = 6.0f * 16.0f;   // "random" is 6 chars
+                float text_x = (bx + bw * 0.5f - text_w_px * 0.5f) / 2.0f;
+                float text_y = (by + bh * 0.5f - 8.0f) / 2.0f;
+                SDL_RenderDebugText(renderer, text_x, text_y, "random");
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
+
             ListGeom lg = get_list_geom();
             const float row_h  = lg.row_h;
             const float list_x = lg.x;
@@ -2147,12 +2193,15 @@ int main(int argc, char* argv[]) {
                     if (ry + TEXT_BOTTOM > list_y + list_h) continue;    // bottom text clipped
 
                     char line1[256];
-                    char line2[128];
-                    SDL_snprintf(line1, sizeof(line1), "%s - %s",
-                                 songs[i].artist.c_str(), songs[i].title.c_str());
-                    SDL_snprintf(line2, sizeof(line2), "[%s]  %dK  OD%.1f",
+                    char line2[256];
+                    // [NK] badge prefix on line1 (lazer parity), title after.
+                    // line2: artist, difficulty name, OD.
+                    SDL_snprintf(line1, sizeof(line1), "[%dK] %s",
+                                 songs[i].key_count, songs[i].title.c_str());
+                    SDL_snprintf(line2, sizeof(line2), "%s   [%s]  OD%.1f",
+                                 songs[i].artist.c_str(),
                                  songs[i].version.c_str(),
-                                 songs[i].key_count, songs[i].od);
+                                 songs[i].od);
 
                     SDL_SetRenderScale(renderer, 3.0f, 3.0f);
                     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
