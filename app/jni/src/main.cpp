@@ -161,16 +161,18 @@ int main(int argc, char* argv[]) {
     // Video decode smoke test (session 3b). Decodes first few frames
     // from a known video file. Remove once 3e wires it to song select.
     {
+        // Session 3c: exercise all three container/codec paths.
         const char* candidates[] = {
             "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/249826 ShinRa-Bansho - Noumiso Rigid Girl (J-99)/Rigid Brain Girl.mp4",
-            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/243228 Vivlos (CV Itou Ayasa) - Marine Blue Magic 3 (Mochineko)/mv.mp4",
-            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/151010 wotoha - O108ROCKET (feat. Neko Hacker) (Garden)/video.mp4",
+            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/41403 fripSide - Last Fortune (Short Ver.) (wcx19911123)/lastfortune.avi",
+            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/444632 MYTH & ROID - STYX HELIX (Tsukuyomi)/VIDEO.flv",
         };
-        bool ok = false;
+        int passed = 0;
         for (const char* c : candidates) {
-            if (video_decoder_probe(c)) { ok = true; break; }
+            if (video_decoder_probe(c)) passed++;
         }
-        if (!ok) SDL_Log("VIDEO: no test file found in any known location");
+        SDL_Log("VIDEO: container test — %d/%d candidates decoded",
+                passed, (int)(sizeof(candidates) / sizeof(candidates[0])));
     }
 
     // Write bundled default sounds to the files dir on first launch
