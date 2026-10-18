@@ -232,3 +232,39 @@ Sizes above are **pre-link**. The final binary pulls only the symbols
 we call. Given `--disable-everything` + three demuxers + five decoders,
 expected real APK delta is 2-4 MB. Measured in session 3 when CMake
 actually links.
+
+
+## Session 3a verification
+
+FFmpeg is statically linked into `libmain.so`. Build succeeds. The
+three stub functions (`video_ffmpeg_link_test_avcodec`,
+`video_ffmpeg_link_test_avformat`, `video_ffmpeg_link_test_version`)
+are exported and visible in `nm -D libmain.so`.
+
+### What broke the first attempt
+
+FFmpeg headers do NOT wrap themselves in `extern "C"`. In a `.cpp`
+file, this emits C++-mangled references (`_Z15avcodec_versionv`) that
+the linker cannot match against plain C symbols in the archives.
+Fix: wrap the `#include <libav*>` lines in `extern "C" { ... }`.
+
+Also required `-Wl,--start-group ... -Wl,--end-group` around the five
+libav*.a files — they have circular dependencies and single-pass link
+order can't resolve all symbols.
+
+### Size, measured
+
+- `libmain.so`: 4.4 MB — essentially unchanged from pre-FFmpeg. The
+  three version functions pull in one tiny `.o`; `--gc-sections`
+  stripped the other 33.96 MB of static libs entirely.
+- Debug APK: 2.57 MB → 1.81 MB. Smaller because `--gc-sections`
+  also stripped unused code from our own `.cpp` files, not just
+  FFmpeg. No functional loss detected.
+- Release APK: 1.33 MB.
+
+**Real FFmpeg cost appears in session 3b** when we call actual decode
+functions (`avformat_open_input`, `avcodec_find_decoder`,
+`avcodec_send_packet`, `avcodec_receive_frame`, `sws_scale`). The
+linker will then pull in h264 decoder tables, mov demuxer, swscale
+converters. Estimate: `.so` grows to 6-8 MB, APK to 3-4 MB. Still
+tiny.
