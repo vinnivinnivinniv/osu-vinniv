@@ -413,6 +413,103 @@ Upgrade path:
   reuse a smaller difficulty calculation or skip entirely)
 - Backup/shared audio: currently every song folder duplicates its
   hitsounds; could share via files/skin/default/
+- **Quadrant touch controls for 4K.** Alternative to the current
+  horizontal 4-column tap layout. Splits the screen into four quadrants
+  (upper-left, upper-right, lower-left, lower-right). Upper pair hits
+  the outer two columns; lower pair hits the inner two. Familiar from
+  DDR-style phone layouts. Ships **alongside** the standard column
+  layout, user-selectable in settings.
+
+  Design constraints:
+  - **4K only.** 5K+ has too many columns per quadrant to be legible
+    on a phone screen; a 5K "2+1+2" split is tempting but speculative.
+    Ship 4K first, defer higher.
+  - **Geometry**: split the safe-area rect (not the raw window rect —
+    matters when the safe-area toggle ships) into two halves each
+    axis. Outer columns are the top two quadrants; inner columns are
+    the bottom two. Left half of screen = left column of each pair.
+  - **Press feedback matters more than with columns.** A quadrant
+    press lights both the outer-left key strip and outer-right key
+    strip simultaneously. Without the two-column flash the mental
+    mapping breaks and notes look unresponsive.
+  - **Settings key**: `touch_layout=columns|quadrants`. Ignored on
+    key counts other than 4. Reset to `columns` if the map's key count
+    changes away from 4.
+  - **Interaction with drag**: the song-select drag handler already
+    uses two-finger gesture state (`song_drag_id`). Quadrant input is
+    per-touch-column, uses `active_fingers` keyed by column index.
+    No conflict — the existing column-based touch path just maps
+    quadrant → column instead of x-coordinate → column.
+  - **Not for OTG keyboards.** This is a touch-only alternative.
+    Keyboard dispatch (SDLK_*) is orthogonal and unaffected.
+
+- **Arrow key + Enter keyboard navigation.** Currently only Esc
+  (back/cancel), R/`` ` `` (retry), and gameplay column keys are bound.
+  Add the standard nav set so the app is playable without touch:
+
+  **In song select (AppState::SongSelect)**
+  - `Up` / `Down` — move `selected_index` ±1, keep row visible
+  - `Page Up` / `Page Down` — jump by visible row count
+  - `Home` / `End` — top / bottom of the list
+  - `Enter` — start play on the currently-selected entry
+  - No-op when `songs.empty()` (during scan)
+
+  **In settings (AppState::Settings)**
+  - `Up` / `Down` — cycle `settings_row` focus indicator
+  - `Left` / `Right` — decrement / increment focused slider
+  - `Enter` — enter keybind-capture mode for the focused row
+  - `Escape` — exit settings (already works)
+
+  **In gameplay (AppState::Playing)**
+  - Existing: column keys per keybind, R/`` ` `` restart, Esc pause
+
+  Conflicts to check: none of these collide with default 4K
+  (`D F J K`) or 7K (`S D F Space J K L`) column keys.
+
+- **10K key-drop investigation.** Symptom: on 10K maps, individual
+  column presses intermittently fail to register — the corresponding
+  column doesn't flash, and no note is judged. Pressing all 10
+  simultaneously *does* occasionally register every column visually.
+  Presently unclear whether the failure is at the keyboard layer,
+  Android input, SDL event dispatch, or our binding lookup.
+
+  **Ranked hypotheses** (most to least likely):
+  1. **Physical keyboard rollover limit.** Most USB keyboards ship
+     with 6KRO — the hardware cannot report more than 6 concurrent
+     keys. NKRO keyboards break this but often need a hardware mode
+     toggle. Symptom matches. **Test first.**
+  2. **scrcpy `uhid` 6-key HID limit.** Already documented in Lessons.
+     If testing is done through scrcpy, this alone explains everything.
+  3. **Default 10K binding has problem keys.** `A S D F V N J K L
+     Semicolon`. `Semicolon` is layout-dependent; `V` and `N` are
+     classic ghost positions. If drops cluster on specific columns,
+     this is the cause.
+  4. **SDL3 event queue drops under fast input.** Less likely — SDL
+     queues are generous — but worth instrumenting.
+  5. **`!e.key.repeat` filter eats real presses.** Rare, but the
+     filter interacts with rollover.
+
+  **Diagnostic ladder** (in order):
+  1. Rule out scrcpy. Test with real OTG keyboard, no scrcpy running.
+     If drops disappear, this was the cause and there's no code fix.
+  2. Rule out the keyboard. Test with a different keyboard. If one
+     drops and another doesn't, it's rollover. If both drop the same
+     columns, it's our code.
+  3. Log every KEY_DOWN with key code, name, repeat, and current
+     key_count. Mashing 10K and grepping missing columns confirms
+     whether the event reached us.
+  4. Check cluster pattern: same columns always failing = hardware
+     ghosting; random = queue overflow.
+  5. Try a rollover-friendlier 10K default — e.g. `A S D F G H J K L
+     Semicolon` splits into two clean hands.
+
+  **Mitigations**: change default binding (1-line), add settings
+  warning when 10K is selected, or document NKRO requirement. Blast
+  radius is contained — dispatch is `bindings[keys]` lookup in
+  `SDL_EVENT_KEY_DOWN` plus the same in KEY_UP.
+
+  **Reference**: `SDL3/SDL_keyboard.h`, the scrcpy 6-key note in
+  `## Lessons learned`.
 
 
 ## Mania key conversions (Key mods)
@@ -453,6 +550,64 @@ Key points:
 - Better fonts (currently SDL's 8x8 debug font)
 - Custom hitsound banks per map (SampleSet / SampleIndex in .osu)
 - Std → mania converts
+- **FPS cap / HUD artifacts.** The HUD reads FPS over a 1 s window and
+  will not exceed panel refresh even with `fps_cap=0`. Two causes:
+  1. **`vsync_enabled` is evaluated once at startup** as
+     `(cfg_fps_cap == 120)`. Changing the cap at runtime updates
+     `cfg_fps_cap` but does not re-evaluate vsync — the code
+     deliberately avoids re-enabling vsync because
+     `SDL_SetRenderVSync(renderer, 1)` blocks on Android and can
+     freeze the event loop. Net: set `fps_cap=0` and the HUD still
+     reads ~120. **Restart the app** and vsync stays off, software
+     cap becomes the only limiter.
+  2. **Android compositor can throttle to panel refresh regardless.**
+     On a 120 Hz panel the HUD will read ~120 even with vsync off.
+     Truly exceeding panel refresh needs SurfaceFlinger-level work
+     and isn't useful for a rhythm game.
+  What matters is frame-time **stability** at the cap. Stable 120
+  with p99 under 9 ms beats a spiky 144.
+- **Power / thermal / frame-time benchmark logging.** Dev-only,
+  gated on `benchmark=1` in settings.ini. 1 Hz sample, hooked into
+  the existing `FPS[%d]` log cadence. Per-sample metrics:
+  FPS + frame-time mean/max/p99 + dropped-frame count;
+  battery current (`/sys/class/power_supply/battery/current_now`),
+  voltage, SoC, and temperature (tenths of a degree C);
+  SoC thermal zones (highest non-battery `thermal_zone*/temp` as
+  `soc_temp`, distinct from battery temp and the value that predicts
+  throttling); per-cluster CPU freq (`cpu0/4/6/cpufreq/scaling_cur_freq`);
+  GPU freq on Qualcomm (`/sys/class/kgsl/kgsl-3d0/gpuclk`);
+  VmRSS from `/proc/self/status`. Output as JSON-lines to
+  `files/logs/bench_<UTC>.jsonl`; append a summary record on
+  session end.
+  **SELinux caveat**: `/sys/class/power_supply/*`, thermal zones,
+  and cpufreq files are frequently restricted to system UIDs on
+  modern Android. Logger must cache per-path read success and
+  never spam errors; fall back to what's readable (`/proc/self/status`
+  always works). First run on the V29e tells us what's accessible.
+  Purpose: validate SAMPLE_CONCURRENCY pools don't cost CPU over
+  long sessions, async scan doesn't spike power on launch, SV math
+  doesn't push GPU harder on SV-heavy sections, 120 FPS is stable
+  not bursty, and thermal throttling on the V29e doesn't manifest
+  as silent FPS drop.
+- **Skip intro on retry / auto-seek to first note.** Maps with
+  long silent intros (10–30 s) force sitting through the intro on
+  every retry. Lazer doesn't skip; mobile friction is real.
+  Design: at play start / retry, compute `first_note_time`. If
+  `> skip_threshold_ms` (≈ 3000–5000), begin playback at
+  `first_note_time - lead_in_ms` (≈ 1500–2000, enough for the first
+  note to visibly approach). Retry always skips; fresh load only
+  if intro is long.
+  Implementation: current clock is
+  `now_ms = (wav_len - SDL_GetAudioStreamQueued) / bytes_per_ms`.
+  Queue `wav_data[skip_offset .. wav_len]` and track `skip_to_ms`;
+  clock becomes `skip_to_ms + (played / bytes_per_ms)`. Pause/resume
+  already manipulates `audio_start_tick`; skip offset is orthogonal.
+  A ~150 ms fade-in softens the attack.
+  Difficulty: 1–2 h for core skip; +1 h for fade-in and indicator.
+  Pairs with eventual "resume from last failure point" — both are
+  "don't restart from 0" variants; do this first and the mechanism
+  extends.
+- **Bar lines.** Cosmetic beat markers.
 
 ## Lessons learned (read before your first patch)
 
