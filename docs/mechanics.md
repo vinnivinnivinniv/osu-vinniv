@@ -32,6 +32,7 @@ Status legend:
 | Accuracy weights (Perfect = 305) | `ManiaScoreProcessor.GetBaseScoreForResult` | fixed 2026-10-16 (was 300) |
 | SS rank requires no Good/Ok/Meh/Miss | `ManiaScoreProcessor.RankFromScore` | fixed 2026-10-16 |
 | Touch→mouse synthesis disabled | `SDL_HINT_TOUCH_MOUSE_EVENTS` | fixed 2026-10-16; was double-judging per tap |
+| Touch layout options: columns / quadrants (4K) / screen | `find_col*` | three modes via `touch_layout` setting |
 | Per-TP sampleSet (bank switches mid-map) | `SampleControlPoint` | fixed 2026-10-16 |
 | Press plays target-note sample | `GameplaySampleTriggerSource.Play` | fixed 2026-10-16; was map-wide default |
 | Tail sample resolves at end_time bank | `DrawableHoldNoteTail` samples | fixed 2026-10-16 |
