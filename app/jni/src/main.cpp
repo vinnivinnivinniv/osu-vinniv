@@ -10,6 +10,7 @@
 #include "osz_import.h"
 #include "audio_load.h"
 #include "preview_player.h"
+#include "video_decode.h"
 #include "image_load.h"
 #include "map_sample_bank.h"
 #include "bundled_sounds.h"
@@ -156,6 +157,21 @@ static double osu_speed_to_scroll_pps(double speed, double visible_height_px) {
 
 int main(int argc, char* argv[]) {
     SDL_Log("OSUVINNIV_MAIN_ENTERED argc=%d", argc);
+
+    // Video decode smoke test (session 3b). Decodes first few frames
+    // from a known video file. Remove once 3e wires it to song select.
+    {
+        const char* candidates[] = {
+            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/249826 ShinRa-Bansho - Noumiso Rigid Girl (J-99)/Rigid Brain Girl.mp4",
+            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/243228 Vivlos (CV Itou Ayasa) - Marine Blue Magic 3 (Mochineko)/mv.mp4",
+            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/151010 wotoha - O108ROCKET (feat. Neko Hacker) (Garden)/video.mp4",
+        };
+        bool ok = false;
+        for (const char* c : candidates) {
+            if (video_decoder_probe(c)) { ok = true; break; }
+        }
+        if (!ok) SDL_Log("VIDEO: no test file found in any known location");
+    }
 
     // Write bundled default sounds to the files dir on first launch
     ensure_bundled_sounds("/sdcard/Android/data/sh.ppy.osuvinniv/files");
