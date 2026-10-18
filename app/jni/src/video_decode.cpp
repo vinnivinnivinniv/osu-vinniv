@@ -42,11 +42,20 @@ VideoDecoder* video_decoder_open(const char* path) {
     VideoDecoder* d = new VideoDecoder();
     if (!d) return nullptr;
 
-    if (avformat_open_input(&d->fmt, path, nullptr, nullptr) < 0) {
+    // Cap stream analysis so first-frame latency stays low. Default
+    // is 5 s of content / 5 MB probed — way more than we need to
+    // determine stream dimensions and codec parameters.
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "analyzeduration", "500000", 0);  // 500 ms
+    av_dict_set(&opts, "probesize", "200000", 0);        // 200 KB
+
+    if (avformat_open_input(&d->fmt, path, nullptr, &opts) < 0) {
+        av_dict_free(&opts);
         SDL_Log("VIDEO: avformat_open_input failed: %s", path);
         video_decoder_close(d);
         return nullptr;
     }
+    av_dict_free(&opts);
 
     if (avformat_find_stream_info(d->fmt, nullptr) < 0) {
         SDL_Log("VIDEO: avformat_find_stream_info failed");

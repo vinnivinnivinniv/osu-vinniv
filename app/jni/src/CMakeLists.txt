@@ -21,6 +21,7 @@ add_library(main SHARED
     audio_decode.cpp
     preview_player.cpp
     video_decode.cpp
+    video_player.cpp
     ${MINIZ_DIR}/miniz.c
     ${MINIZ_DIR}/miniz_tdef.c
     ${MINIZ_DIR}/miniz_tinfl.c

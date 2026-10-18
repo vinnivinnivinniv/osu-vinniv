@@ -11,6 +11,7 @@
 #include "audio_load.h"
 #include "preview_player.h"
 #include "video_decode.h"
+#include "video_player.h"
 #include "image_load.h"
 #include "map_sample_bank.h"
 #include "bundled_sounds.h"
@@ -334,6 +335,14 @@ int main(int argc, char* argv[]) {
     int win_w = 0, win_h = 0;
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
     SDL_Log("Window size: %dx%d", win_w, win_h);
+
+    // Session 3d: worker-thread video playback test. Loads one
+    // known-good mp4 and runs the VideoPlayer for 2 seconds.
+    // Remove in session 3e when song-select integration lands.
+    {
+        video_player_probe("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/249826 ShinRa-Bansho - Noumiso Rigid Girl (J-99)/Rigid Brain Girl.mp4",
+                           renderer);
+    }
 
     Beatmap map;
     {
