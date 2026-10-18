@@ -198,6 +198,7 @@ int main(int argc, char* argv[]) {
     float cfg_hitsound_vol = 1.0f;
     float cfg_scroll_speed = 1.5f;
     int   cfg_touch_layout = 0;  // 0=columns, 1=quadrants (4K only)
+    bool  cfg_show_converts = false;  // Show std/taiko/catch maps as converts
     int   cfg_fps_cap      = 120;   // 0 = uncapped
     float cfg_audio_offset_ms = 0.0f;
     bool  vsync_enabled    = (cfg_fps_cap == 120);
@@ -245,6 +246,7 @@ int main(int argc, char* argv[]) {
         fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
         fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
         fprintf(f, "touch_layout=%d\n",       cfg_touch_layout);
+        fprintf(f, "show_converts=%d\n",      cfg_show_converts ? 1 : 0);
         fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
         fprintf(f, "audio_offset_ms=%.3f\n", cfg_audio_offset_ms);
         for (int nk = 1; nk <= 10; nk++) {
@@ -293,6 +295,7 @@ int main(int argc, char* argv[]) {
                 else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
                 else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
                 else if (k == "touch_layout")    cfg_touch_layout = std::stoi(v);
+                else if (k == "show_converts")   cfg_show_converts = (std::stoi(v) != 0);
                 else if (k == "fps_cap")         cfg_fps_cap      = std::stoi(v);
                 else if (k == "audio_offset_ms") cfg_audio_offset_ms = std::stof(v);
             } catch (...) {}
@@ -768,7 +771,19 @@ int main(int argc, char* argv[]) {
 
     // Scan runs on a worker thread. Main thread shows "Scanning..." until
     // the worker completes; see scan.try_consume() inside the frame loop.
-    std::vector<SongEntry> songs;
+    std::vector<SongEntry> all_songs;   // everything from scan
+    std::vector<SongEntry> songs;       // filtered view (mania-only by default)
+
+    // Rebuild the display list from all_songs based on the
+    // Show converts setting. Called after scan, and on toggle.
+    auto rebuild_songs = [&]() {
+        songs.clear();
+        songs.reserve(all_songs.size());
+        for (const auto& s : all_songs) {
+            if (cfg_show_converts || s.original_mode == 3)
+                songs.push_back(s);
+        }
+    };
     SongScanState scan;
     scan.start("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs",
                "/sdcard/Android/data/sh.ppy.osuvinniv/files/inbox");
@@ -905,12 +920,14 @@ int main(int argc, char* argv[]) {
 
 
     while (running) {
-        if (scan.try_consume(songs)) {
+        if (scan.try_consume(all_songs)) {
+            rebuild_songs();
             selected_index = 0;
             song_scroll = 0.0f;
             preview_key.clear();
             song_bg_key.clear();
-            SDL_Log("SCAN: consumed %zu entries", songs.size());
+            SDL_Log("SCAN: consumed %zu entries (filtered to %zu visible)",
+                    all_songs.size(), songs.size());
             for (int _i = 0; _i < 5 && _i < (int)songs.size(); _i++)
                 SDL_Log("SONG[%d]: artist='%s' title='%s' ver='%s'",
                         _i, songs[_i].artist.c_str(),
@@ -1105,6 +1122,20 @@ int main(int argc, char* argv[]) {
                     SDL_Log("SETTINGS: open (pre-scan)");
                     continue;
                 }
+                // Show converts button (top-right)
+                if (bstx >= win_w - 300.0f && bstx <= win_w - 40.0f &&
+                    bsty >= 40.0f && bsty <= 120.0f) {
+                    cfg_show_converts = !cfg_show_converts;
+                    rebuild_songs();
+                    selected_index = 0;
+                    song_scroll = 0.0f;
+                    preview_key.clear();
+                    song_bg_key.clear();
+                    save_settings();
+                    SDL_Log("CONVERTS: %s (%zu visible)",
+                            cfg_show_converts ? "on" : "off", songs.size());
+                    continue;
+                }
                 // Random button (below settings)
                 if (bstx >= 40.0f && bstx <= 280.0f &&
                     bsty >= 240.0f && bsty <= 320.0f) {
@@ -1238,6 +1269,23 @@ int main(int argc, char* argv[]) {
                             if (!parse_osu_file(s.osu_path, new_map)) {
                                 SDL_Log("SONGS: parse failed");
                             } else {
+                                // Placeholder converter: non-mania maps
+                                // become 4K by mapping X (0-511) to
+                                // column (0-3). Sliders/spinners arrive
+                                // as taps; not faithful, just playable.
+                                // Real converter lands per docs/mechanics.md.
+                                if (new_map.mode != 3) {
+                                    int cols = 4;
+                                    for (auto& n : new_map.notes) {
+                                        int c = (int)((double)n.column / 128.0);
+                                        if (c < 0) c = 0;
+                                        if (c > cols - 1) c = cols - 1;
+                                        n.column = c;
+                                    }
+                                    new_map.key_count = cols;
+                                    SDL_Log("CONVERT: mode=%d -> %dK, %zu notes",
+                                            new_map.mode, cols, new_map.notes.size());
+                                }
                                 map = new_map;
                                 rebuild_timing_positions();
 
@@ -2306,6 +2354,43 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderScale(renderer, 1.0f, 1.0f);
             }
 
+            // Show converts button (top-right, above the song panel)
+            {
+                const float bx = win_w - 300.0f;
+                const float by = 40.0f;
+                const float bw = 260.0f;
+                const float bh = 80.0f;
+
+                // Background tint reflects state: green when on, dim when off.
+                if (cfg_show_converts) {
+                    SDL_SetRenderDrawColor(renderer, 40, 70, 40, 255);
+                } else {
+                    SDL_SetRenderDrawColor(renderer, 40, 50, 70, 255);
+                }
+                SDL_FRect bg = { bx, by, bw, bh };
+                SDL_RenderFillRect(renderer, &bg);
+
+                if (cfg_show_converts) {
+                    SDL_SetRenderDrawColor(renderer, 140, 220, 140, 255);
+                } else {
+                    SDL_SetRenderDrawColor(renderer, 180, 180, 100, 255);
+                }
+                SDL_RenderRect(renderer, &bg);
+
+                // Label text — reflects what the click will do
+                const char* label = cfg_show_converts ? "hide converts"
+                                                     : "show converts";
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                if (cfg_show_converts) SDL_SetRenderDrawColor(renderer, 200, 255, 200, 255);
+                else                   SDL_SetRenderDrawColor(renderer, 220, 220, 140, 255);
+                int n_chars = (int)strlen(label);
+                float text_w_px = (float)n_chars * 16.0f;
+                float text_x = (bx + bw * 0.5f - text_w_px * 0.5f) / 2.0f;
+                float text_y = (by + bh * 0.5f - 8.0f) / 2.0f;
+                SDL_RenderDebugText(renderer, text_x, text_y, label);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
+
             ListGeom lg = get_list_geom();
             const float row_h  = lg.row_h;
             const float list_x = lg.x;
@@ -2360,9 +2445,11 @@ int main(int argc, char* argv[]) {
                     char line1[256];
                     char line2[256];
                     // [NK] badge prefix on line1 (lazer parity), title after.
-                    // line2: artist, difficulty name, OD.
-                    SDL_snprintf(line1, sizeof(line1), "[%dK] %s",
-                                 songs[i].key_count, songs[i].title.c_str());
+                    // Converts get a [Conv] tag ahead of the badge so they
+                    // stand out in the list when Show converts is on.
+                    const char* conv_tag = (songs[i].original_mode != 3) ? "[Conv] " : "";
+                    SDL_snprintf(line1, sizeof(line1), "%s[%dK] %s",
+                                 conv_tag, songs[i].key_count, songs[i].title.c_str());
                     SDL_snprintf(line2, sizeof(line2), "%s   [%s]  OD%.1f",
                                  songs[i].artist.c_str(),
                                  songs[i].version.c_str(),

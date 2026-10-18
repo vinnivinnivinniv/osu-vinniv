@@ -39,9 +39,9 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     Beatmap m;
     if (!parse_osu_file(osu_path, m, /* metadata_only = */ true)) return false;
 
-    // Only import native mania maps. Std/taiko/catch maps would need a
-    // real ruleset converter to play correctly.
-    if (m.mode != 3) return false;
+    // Accept all modes. Display filter (Show converts toggle in main.cpp)
+    // hides non-mania entries by default. Playback of converts uses a
+    // placeholder 4K converter in main.cpp until the real converter lands.
 
     e.osu_path = osu_path;
     e.title    = m.title;
@@ -50,6 +50,8 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     e.key_count = m.key_count;
     e.od        = m.od;
     e.preview_time = m.preview_time;
+    e.original_mode = m.mode;
+    if (m.mode != 3) e.key_count = 4;   // placeholder: 4K for all converts
 
     // Resolve audio path relative to the .osu folder
     std::string folder = osu_path;

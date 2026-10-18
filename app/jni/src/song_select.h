@@ -16,6 +16,7 @@ struct SongEntry {
     std::string bg_path;     // absolute path to bg image (or "" if missing)
     std::string video_path;  // absolute path to video (or "" if missing)
     int         key_count;
+    int         original_mode = 3;  // 0=std, 1=taiko, 2=catch, 3=mania
     double      od;
     int         preview_time = -1;  // ms; -1 = unset
 };
