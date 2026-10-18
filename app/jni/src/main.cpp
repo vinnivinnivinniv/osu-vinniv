@@ -197,6 +197,7 @@ int main(int argc, char* argv[]) {
     float cfg_music_vol    = 0.6f;
     float cfg_hitsound_vol = 1.0f;
     float cfg_scroll_speed = 1.5f;
+    int   cfg_touch_layout = 0;  // 0=columns, 1=quadrants (4K only)
     int   cfg_fps_cap      = 120;   // 0 = uncapped
     float cfg_audio_offset_ms = 0.0f;
     bool  vsync_enabled    = (cfg_fps_cap == 120);
@@ -220,6 +221,7 @@ int main(int argc, char* argv[]) {
         { "FPS Cap",         1, &cfg_fps_cap,          0.0f,   0.0f,
             {"60","120","240","Uncapped"}, {60,120,240,0}, 4, 0 },
         { "Audio Offset",    0, &cfg_audio_offset_ms, -200.f, 200.f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
+        { "Touch layout",    1, &cfg_touch_layout,     0.0f,   0.0f, {"columns","quadrants","screen",nullptr}, {0,1,2,0}, 3, 0 },
         { "4K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  4 },
         { "5K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  5 },
         { "6K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  6 },
@@ -242,6 +244,7 @@ int main(int argc, char* argv[]) {
         fprintf(f, "music_volume=%.3f\n",    cfg_music_vol);
         fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
         fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
+        fprintf(f, "touch_layout=%d\n",       cfg_touch_layout);
         fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
         fprintf(f, "audio_offset_ms=%.3f\n", cfg_audio_offset_ms);
         for (int nk = 1; nk <= 10; nk++) {
@@ -289,6 +292,7 @@ int main(int argc, char* argv[]) {
                 else if (k == "music_volume")    cfg_music_vol    = std::stof(v);
                 else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
                 else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
+                else if (k == "touch_layout")    cfg_touch_layout = std::stoi(v);
                 else if (k == "fps_cap")         cfg_fps_cap      = std::stoi(v);
                 else if (k == "audio_offset_ms") cfg_audio_offset_ms = std::stof(v);
             } catch (...) {}
@@ -531,6 +535,34 @@ int main(int argc, char* argv[]) {
     auto find_col = [&](float x) -> int {
         int c = (int)((x - playfield_x) / col_w);
         return (c >= 0 && c < keys && c < 16) ? c : -1;
+    };
+
+    // Quadrant hit-test for 4K only. Returns -1 if keys != 4
+    // (caller must fall back to find_col). Layout:
+    //   UL -> col 0 (outer-left)   UR -> col 3 (outer-right)
+    //   LL -> col 1 (inner-left)   LR -> col 2 (inner-right)
+    auto find_col_quadrant = [&](float x, float y) -> int {
+        if (keys != 4) return -1;
+        bool right = x >= (float)win_w * 0.5f;
+        bool lower = y >= (float)win_h * 0.5f;
+        if (!right && !lower) return 0;   // UL
+        if (!right &&  lower) return 1;   // LL
+        if ( right &&  lower) return 2;   // LR
+        return 3;                         // UR
+    };
+
+    // Screen-space column hit-test. Divides the whole window
+    // horizontally into `keys` equal strips. Unlike find_col
+    // (playfield-bounded), this ignores playfield_x/col_w — taps
+    // anywhere on screen map to the nearest strip. Wide hit targets,
+    // works at any key count, ignores playfield width.
+    auto find_col_screen = [&](float x) -> int {
+        if (keys <= 0 || win_w <= 0) return -1;
+        float strip_w = (float)win_w / (float)keys;
+        int c = (int)(x / strip_w);
+        if (c < 0) c = 0;
+        if (c >= keys) c = keys - 1;
+        return (c < 16) ? c : -1;
     };
 
 
@@ -1395,7 +1427,15 @@ int main(int argc, char* argv[]) {
             }
             if (e.type == SDL_EVENT_FINGER_DOWN && !paused && !resuming && !result_shown && app_state == AppState::Playing) {
                 float tx = e.tfinger.x * (float)win_w;
-                int col = find_col(tx);
+                float ty = e.tfinger.y * (float)win_h;
+                int col;
+                if (cfg_touch_layout == 1 && keys == 4) {
+                    col = find_col_quadrant(tx, ty);
+                } else if (cfg_touch_layout == 2) {
+                    col = find_col_screen(tx);
+                } else {
+                    col = find_col(tx);
+                }
                 if (col >= 0) {
                     // Replace existing entry for this finger
                     for (auto& f : active_fingers) {
@@ -1494,7 +1534,14 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !paused && !resuming && !result_shown && app_state == AppState::Playing) {
-                int col = find_col(e.button.x);
+                int col;
+                if (cfg_touch_layout == 1 && keys == 4) {
+                    col = find_col_quadrant(e.button.x, e.button.y);
+                } else if (cfg_touch_layout == 2) {
+                    col = find_col_screen(e.button.x);
+                } else {
+                    col = find_col(e.button.x);
+                }
                 if (col >= 0) {
                     column_pressed[col] = true;
                     play_press_sound(col);
@@ -1502,7 +1549,14 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && !paused && !resuming && app_state == AppState::Playing) {
-                int col = find_col(e.button.x);
+                int col;
+                if (cfg_touch_layout == 1 && keys == 4) {
+                    col = find_col_quadrant(e.button.x, e.button.y);
+                } else if (cfg_touch_layout == 2) {
+                    col = find_col_screen(e.button.x);
+                } else {
+                    col = find_col(e.button.x);
+                }
                 if (col >= 0) column_pressed[col] = false;
             }
             if (e.type == SDL_EVENT_KEY_UP) {
