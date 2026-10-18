@@ -1025,6 +1025,15 @@ int main(int argc, char* argv[]) {
                 audio_queued = false;
                 audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
+                // Reset pause/resume/result state. Previously the R-key
+                // retry reset note arrays but left `paused`, `resuming`,
+                // and `result_shown` untouched. Effect: pressing R during
+                // the resume countdown left the big number overlay up on
+                // the fresh attempt, and the deferred `RESUME: go` fired
+                // a few seconds later against already-fresh audio.
+                paused = false;
+                resuming = false;
+                result_shown = false;
                 SDL_Log("RESTART: reset to t=0");
             }
 
