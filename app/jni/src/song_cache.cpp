@@ -44,7 +44,7 @@ bool load_song_cache(const std::string& path, time_t expected_mtime,
     std::string line;
     if (!std::getline(f, line)) return false;
     if (line.size() < 3) return false;
-    if (line.compare(0, 2, "v4") != 0) return false;
+    if (line.compare(0, 2, "v5") != 0) return false;
     long long cached_mtime = std::atoll(line.c_str() + 3);
     if ((long long)expected_mtime != cached_mtime) return false;
 
@@ -57,7 +57,7 @@ bool load_song_cache(const std::string& path, time_t expected_mtime,
             else cur.push_back(c);
         }
         parts.push_back(cur);
-        if (parts.size() < 10) continue;
+        if (parts.size() < 11) continue;
 
         SongEntry e;
         e.folder     = unesc(parts[0]);
@@ -70,6 +70,7 @@ bool load_song_cache(const std::string& path, time_t expected_mtime,
         e.audio_path = unesc(parts[7]);
         e.bg_path    = unesc(parts[8]);
         e.preview_time = std::atoi(parts[9].c_str());
+        e.video_path = unesc(parts[10]);
         out.push_back(e);
     }
     return true;
@@ -83,7 +84,7 @@ void save_song_cache(const std::string& path, time_t mtime,
     std::ofstream f(path);
     if (!f.is_open()) return;
 
-    f << "v4 " << (long long)mtime << "\n";
+    f << "v5 " << (long long)mtime << "\n";
     for (const auto& e : entries) {
         f << esc(e.folder)     << "|"
           << esc(e.osu_path)   << "|"
@@ -94,6 +95,7 @@ void save_song_cache(const std::string& path, time_t mtime,
           << e.od              << "|"
           << esc(e.audio_path) << "|"
           << esc(e.bg_path)    << "|"
-          << e.preview_time    << "\n";
+          << e.preview_time    << "|"
+          << esc(e.video_path) << "\n";
     }
 }

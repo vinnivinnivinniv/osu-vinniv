@@ -192,6 +192,12 @@ int video_decoder_read_frame(VideoDecoder* d, VideoFrame* out) {
 
 bool video_decoder_seek_ms(VideoDecoder* d, double ms) {
     if (!d || !d->fmt) return false;
+    // Cap to a safe point. If the target is past 90% of duration (or
+    // beyond it entirely), restart from 0 to avoid an infinite
+    // seek->EOF->seek loop in looping players.
+    double dur = video_decoder_duration_ms(d);
+    if (dur > 0.0 && ms > dur * 0.9) ms = 0.0;
+    if (ms < 0.0) ms = 0.0;
     int64_t ts = (int64_t)(ms / d->time_base_ms);
     int ret = av_seek_frame(d->fmt, d->video_idx, ts, AVSEEK_FLAG_BACKWARD);
     if (ret < 0) return false;

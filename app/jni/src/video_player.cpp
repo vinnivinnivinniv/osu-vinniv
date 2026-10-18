@@ -13,12 +13,17 @@ VideoPlayer::VideoPlayer(SDL_Renderer* renderer) : renderer_(renderer) {
 }
 
 VideoPlayer::~VideoPlayer() {
+    shutdown();
+}
+
+void VideoPlayer::shutdown() {
     quit_.store(true);
     generation_.fetch_add(1);
     if (worker_.joinable()) worker_.join();
     if (texture_) {
         SDL_DestroyTexture(texture_);
         texture_ = nullptr;
+        tex_w_ = tex_h_ = 0;
     }
 }
 
@@ -30,6 +35,12 @@ void VideoPlayer::request(const char* path, bool looping, double start_ms) {
         req_start_ms_ = start_ms;
         req_gen_     = generation_.fetch_add(1) + 1;
     }
+    // Drop the previous request's pending frame so tick() doesn't
+    // re-upload it and pin ready_=true on the stale content.
+    {
+        std::lock_guard<std::mutex> lk(frame_mu_);
+        frame_pending_ = false;
+    }
     ready_.store(false);
     frames_delivered_.store(0);
 }
@@ -40,17 +51,24 @@ void VideoPlayer::stop() {
         req_path_.clear();
         req_gen_ = generation_.fetch_add(1) + 1;
     }
+    {
+        std::lock_guard<std::mutex> lk(frame_mu_);
+        frame_pending_ = false;
+    }
     ready_.store(false);
+    frames_delivered_.store(0);
 }
 
 void VideoPlayer::tick() {
-    std::vector<uint8_t> local_data;
     int w = 0, h = 0;
-
     {
         std::lock_guard<std::mutex> lk(frame_mu_);
         if (!frame_pending_) return;
-        local_data.swap(frame_data_);
+        // Swap frame_data_ (worker just filled) into upload_data_ (safe
+        // for us to upload from). Both vectors keep their capacity so no
+        // per-frame 3.7 MB malloc/free churn. Worker is free to reuse
+        // the now-empty frame_data_ on its next post.
+        std::swap(frame_data_, upload_data_);
         w = frame_w_;
         h = frame_h_;
         frame_pending_ = false;
@@ -69,9 +87,23 @@ void VideoPlayer::tick() {
         SDL_SetTextureBlendMode(texture_, SDL_BLENDMODE_BLEND);
     }
 
-    SDL_UpdateTexture(texture_, nullptr, local_data.data(), w * 4);
-    ready_.store(true);
-    frames_delivered_.fetch_add(1);
+    // Use LockTexture for streaming updates — cheaper than UpdateTexture
+    // on several GLES drivers because it skips the internal staging copy.
+    void* pixels = nullptr;
+    int pitch = 0;
+    if (SDL_LockTexture(texture_, nullptr, &pixels, &pitch)) {
+        int row_bytes = w * 4;
+        uint8_t* dst = (uint8_t*)pixels;
+        const uint8_t* src_px = upload_data_.data();
+        for (int y = 0; y < h; y++) {
+            memcpy(dst + y * pitch, src_px + y * row_bytes, row_bytes);
+        }
+        SDL_UnlockTexture(texture_);
+        ready_.store(true);
+        frames_delivered_.fetch_add(1);
+    } else {
+        SDL_Log("VIDEO_PLAYER: SDL_LockTexture failed: %s", SDL_GetError());
+    }
 }
 
 
@@ -83,6 +115,11 @@ void VideoPlayer::worker_loop() {
 
     VideoDecoder* dec = nullptr;
     Uint64 playback_start_tick = 0;
+    // Reference pts: the first frame decoded after open/seek. All
+    // subsequent frames have their pts measured relative to this
+    // value. Reset on every seek. Without this, a video seeking to
+    // start_ms=59208 has f.pts_ms=59208 and paces 59 seconds late.
+    double base_pts_ms = -1.0;
 
     while (!quit_.load()) {
         // Pick up request changes
@@ -112,6 +149,7 @@ void VideoPlayer::worker_loop() {
             }
             if (cur_start_ms > 0.0) video_decoder_seek_ms(dec, cur_start_ms);
             playback_start_tick = SDL_GetTicks();
+            base_pts_ms = -1.0;   // reset reference after seek
             SDL_Log("VIDEO_PLAYER: playing %s (%dx%d, %.2f fps)",
                     cur_path.c_str(),
                     video_decoder_width(dec),
@@ -133,8 +171,11 @@ void VideoPlayer::worker_loop() {
 
         if (r == 0) {
             if (cur_looping) {
-                video_decoder_seek_ms(dec, 0.0);
+                // Loop back to the requested start point (preview_time
+                // in song select), not to absolute 0.
+                video_decoder_seek_ms(dec, cur_start_ms);
                 playback_start_tick = SDL_GetTicks();
+                base_pts_ms = -1.0;   // reset reference after loop seek
                 continue;
             }
             // EOF, hold last frame. Wait for a new request.
@@ -142,8 +183,23 @@ void VideoPlayer::worker_loop() {
             continue;
         }
 
+        // Gen check before doing anything with this frame. Covers the
+        // fast path (due <= now) where the pacing block below would
+        // otherwise be skipped entirely.
+        {
+            std::lock_guard<std::mutex> lk(req_mu_);
+            if (req_gen_ != cur_gen) continue;
+        }
+
+        // Capture baseline pts from the very first frame after a seek.
+        // This makes f.pts_ms after seek-to-59208 relative to 59208, so
+        // pacing starts immediately instead of sleeping 59 seconds.
+        if (base_pts_ms < 0.0) base_pts_ms = f.pts_ms;
+        double rel_pts = f.pts_ms - base_pts_ms;
+        if (rel_pts < 0.0) rel_pts = 0.0;   // guard: first frame may be at or slightly before seek target
+
         // Pacing: sleep until this frame's pts is due relative to playback start.
-        Uint64 due = playback_start_tick + (Uint64)f.pts_ms;
+        Uint64 due = playback_start_tick + (Uint64)rel_pts;
         Uint64 now = SDL_GetTicks();
         if (due > now) {
             Uint64 target = due;

@@ -156,6 +156,23 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
             }
         }
 
+        // Video resolution — same folder as the .osu, using declared filename.
+        // Extension-swap fallback matches the bg resolver behaviour.
+        if (!m.video_file.empty()) {
+            std::vector<std::string> vcandidates;
+            vcandidates.push_back(join(folder, m.video_file));
+            auto dot = m.video_file.find_last_of('.');
+            if (dot != std::string::npos) {
+                std::string base = m.video_file.substr(0, dot);
+                for (const char* ext : {".mp4", ".avi", ".flv", ".MP4", ".AVI", ".FLV"})
+                    vcandidates.push_back(join(folder, base + ext));
+            }
+            struct stat vst;
+            for (const auto& c : vcandidates) {
+                if (stat(c.c_str(), &vst) == 0) { e.video_path = c; break; }
+            }
+        }
+
         if (e.audio_path.empty()) {
             SDL_Log("SONGS: no audio found in %s (declared '%s')",
                     folder.c_str(), m.audio_file.c_str());

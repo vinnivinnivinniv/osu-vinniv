@@ -34,6 +34,7 @@ struct Beatmap {
     std::string version;
     std::string audio_file;
     std::string bg_file;
+    std::string video_file;  // [Events] Video,<offset>,"file.mp4" — filename only
     int sample_set = 0;   // 0=auto, 1=normal, 2=soft, 3=drum (from [General])
     int preview_time = -1;  // ms; -1 = unset; from [General] PreviewTime
     std::vector<TimingPoint> timing_points;  // sorted by time; computed multiplier

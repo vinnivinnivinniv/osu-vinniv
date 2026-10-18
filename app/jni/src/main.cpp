@@ -162,18 +162,6 @@ int main(int argc, char* argv[]) {
     // Video decode smoke test (session 3b). Decodes first few frames
     // from a known video file. Remove once 3e wires it to song select.
     {
-        // Session 3c: exercise all three container/codec paths.
-        const char* candidates[] = {
-            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/249826 ShinRa-Bansho - Noumiso Rigid Girl (J-99)/Rigid Brain Girl.mp4",
-            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/41403 fripSide - Last Fortune (Short Ver.) (wcx19911123)/lastfortune.avi",
-            "/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/444632 MYTH & ROID - STYX HELIX (Tsukuyomi)/VIDEO.flv",
-        };
-        int passed = 0;
-        for (const char* c : candidates) {
-            if (video_decoder_probe(c)) passed++;
-        }
-        SDL_Log("VIDEO: container test — %d/%d candidates decoded",
-                passed, (int)(sizeof(candidates) / sizeof(candidates[0])));
     }
 
     // Write bundled default sounds to the files dir on first launch
@@ -335,14 +323,6 @@ int main(int argc, char* argv[]) {
     int win_w = 0, win_h = 0;
     SDL_GetWindowSizeInPixels(window, &win_w, &win_h);
     SDL_Log("Window size: %dx%d", win_w, win_h);
-
-    // Session 3d: worker-thread video playback test. Loads one
-    // known-good mp4 and runs the VideoPlayer for 2 seconds.
-    // Remove in session 3e when song-select integration lands.
-    {
-        video_player_probe("/sdcard/Android/data/sh.ppy.osuvinniv/files/songs/249826 ShinRa-Bansho - Noumiso Rigid Girl (J-99)/Rigid Brain Girl.mp4",
-                           renderer);
-    }
 
     Beatmap map;
     {
@@ -798,6 +778,8 @@ int main(int argc, char* argv[]) {
     int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
     // Background image cache for song select (declared BEFORE the loader lambda)
     SDL_Texture* song_bg_tex   = nullptr;
+    VideoPlayer  song_video(renderer);   // async video, one per app
+    std::string  song_video_key;         // "ss:" or "play:" + video_path
     std::string  song_bg_key;   // songs[i].bg_path currently loaded
 
     PreviewPlayer    preview;
@@ -997,6 +979,7 @@ int main(int argc, char* argv[]) {
                     SDL_PauseAudioStreamDevice(audio_stream);
                 }
                 audio_queued = false;
+                song_video_key.clear();  // force re-request
                 audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
                 result_shown = false;
@@ -1050,6 +1033,7 @@ int main(int argc, char* argv[]) {
                 hit_pool.clear_all();
                 miss_pool.clear_all();
                 audio_queued = false;
+                song_video_key.clear();  // force re-request
                 audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
                 // Reset pause/resume/result state. Previously the R-key
@@ -1259,6 +1243,7 @@ int main(int argc, char* argv[]) {
                                 }
 
                                 audio_queued = false;
+                song_video_key.clear();  // force re-request
                                 audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
                                 compute_geometry();
@@ -1379,6 +1364,7 @@ int main(int argc, char* argv[]) {
                             hit_pool.clear_all();
                             miss_pool.clear_all();
                             audio_queued = false;
+                song_video_key.clear();  // force re-request
                             audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
                             paused = false;
@@ -1390,6 +1376,7 @@ int main(int argc, char* argv[]) {
                                 SDL_PauseAudioStreamDevice(audio_stream);
                             }
                             audio_queued = false;
+                song_video_key.clear();  // force re-request
                             paused = false;
                             resuming = false;
                             result_shown = false;
@@ -1442,6 +1429,7 @@ int main(int argc, char* argv[]) {
                     SDL_PauseAudioStreamDevice(audio_stream);
                 }
                 audio_queued = false;
+                song_video_key.clear();  // force re-request
                 audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
                 result_shown = false;
@@ -1541,6 +1529,57 @@ int main(int argc, char* argv[]) {
             else
                 song_bg_key.clear();
         }
+
+        // ---- Video state (song select / gameplay) ----
+        // Pause: stop video when entering pause/countdown. On resume,
+        // restart from 0 (known limitation: position not preserved
+        // across pause; fix in a follow-up session).
+        {
+            static bool video_prev_paused = false;
+            bool now_paused = (app_state == AppState::Playing && (paused || resuming));
+            if (now_paused && !video_prev_paused) {
+                song_video.stop();
+                song_video_key.clear();
+            }
+            video_prev_paused = now_paused;
+
+            std::string want_key;
+            bool want_loop = false;
+            bool want_active = false;
+            if (app_state == AppState::SongSelect && !songs.empty()) {
+                want_key = "ss:" + songs[selected_index].video_path;
+                want_loop = true;
+                want_active = true;
+            } else if (app_state == AppState::Playing &&
+                       !paused && !resuming && !result_shown) {
+                want_key = "play:" + songs[selected_index].video_path;
+                want_loop = false;
+                want_active = true;
+            }
+
+            if (want_active && want_key != song_video_key) {
+                // Use video_path directly — do not slice want_key,
+                // because "ss:" is 3 chars and "play:" is 5. Slicing
+                // with a fixed offset left "y:/sdcard/..." on play.
+                const std::string& vid_path = songs[selected_index].video_path;
+                if (!vid_path.empty()) {
+                    // Song select: seek to PreviewTime so video and
+                    // audio preview the same moment. Gameplay: 0.
+                    double start_ms = 0.0;
+                    if (want_loop && app_state == AppState::SongSelect) {
+                        int pt = songs[selected_index].preview_time;
+                        if (pt > 0) start_ms = (double)pt;
+                    }
+                    song_video.request(vid_path.c_str(), want_loop, start_ms);
+                    SDL_Log("VIDEO: %s %s (start=%.0f ms)",
+                            want_loop ? "loop" : "play", vid_path.c_str(), start_ms);
+                } else {
+                    song_video.stop();
+                }
+                song_video_key = want_key;
+            }
+        }
+        song_video.tick();
         // Note: we deliberately DON'T free the bg when leaving song select —
         // gameplay uses the same texture. It gets replaced on the next song
         // selection change or freed at app exit.
@@ -1676,22 +1715,35 @@ int main(int argc, char* argv[]) {
         SDL_SetRenderDrawColor(renderer, 20, 20, 30, 255);
         SDL_RenderClear(renderer);
 
-        // GAMEPLAY BG — draw the current song's bg behind the playfield.
-        if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
-            float tex_ar = (float)song_bg_w / song_bg_h;
-            float win_ar = (float)win_w / win_h;
-            SDL_FRect dst;
-            if (win_ar > tex_ar) {
-                float w = (float)win_w;
-                float h = w / tex_ar;
-                dst = { 0.0f, (win_h - h) * 0.5f, w, h };
-            } else {
-                float h = (float)win_h;
-                float w = h * tex_ar;
-                dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+        // GAMEPLAY BG — video if ready, else static.
+        {
+            SDL_Texture* bg_tex = nullptr;
+            int bg_w = 0, bg_h = 0;
+            if (song_video.ready()) {
+                bg_tex = song_video.current_texture();
+                bg_w = song_video.texture_w();
+                bg_h = song_video.texture_h();
+            } else if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
+                bg_tex = song_bg_tex;
+                bg_w = song_bg_w;
+                bg_h = song_bg_h;
             }
-            SDL_SetTextureAlphaMod(song_bg_tex, 100);
-            SDL_RenderTexture(renderer, song_bg_tex, NULL, &dst);
+            if (bg_tex && bg_w > 0 && bg_h > 0) {
+                float tex_ar = (float)bg_w / bg_h;
+                float win_ar = (float)win_w / win_h;
+                SDL_FRect dst;
+                if (win_ar > tex_ar) {
+                    float w = (float)win_w;
+                    float h = w / tex_ar;
+                    dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                } else {
+                    float h = (float)win_h;
+                    float w = h * tex_ar;
+                    dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                }
+                SDL_SetTextureAlphaMod(bg_tex, 100);
+                SDL_RenderTexture(renderer, bg_tex, NULL, &dst);
+            }
         }
 
         // COLUMN STRIP — dark strip under just the note columns so
@@ -2076,8 +2128,20 @@ int main(int argc, char* argv[]) {
             SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
             SDL_RenderFillRect(renderer, &bg_full);
 
-            if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
-                float tex_ar = (float)song_bg_w / song_bg_h;
+            // Prefer video texture if ready; fall back to static bg.
+            SDL_Texture* bg_tex = nullptr;
+            int bg_w = 0, bg_h = 0;
+            if (song_video.ready()) {
+                bg_tex = song_video.current_texture();
+                bg_w = song_video.texture_w();
+                bg_h = song_video.texture_h();
+            } else if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
+                bg_tex = song_bg_tex;
+                bg_w = song_bg_w;
+                bg_h = song_bg_h;
+            }
+            if (bg_tex && bg_w > 0 && bg_h > 0) {
+                float tex_ar = (float)bg_w / bg_h;
                 float win_ar = (float)win_w / win_h;
                 SDL_FRect dst;
                 if (win_ar > tex_ar) {
@@ -2089,8 +2153,8 @@ int main(int argc, char* argv[]) {
                     float w = h * tex_ar;
                     dst = { (win_w - w) * 0.5f, 0.0f, w, h };
                 }
-                SDL_SetTextureAlphaMod(song_bg_tex, 180);
-                SDL_RenderTexture(renderer, song_bg_tex, NULL, &dst);
+                SDL_SetTextureAlphaMod(bg_tex, 180);
+                SDL_RenderTexture(renderer, bg_tex, NULL, &dst);
 
                 // Slight further dim so list rows stay legible
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -2353,6 +2417,9 @@ int main(int argc, char* argv[]) {
     if (countdown_sfx_stream) SDL_DestroyAudioStream(countdown_sfx_stream);
     if (cd_data)              SDL_free(cd_data);
     // hit/miss/clap/whistle/finish pools free themselves on scope exit.
+    // VideoPlayer owns a texture tied to the renderer. Shut it down
+    // before the renderer is destroyed or SDL is quit.
+    song_video.shutdown();
     if (hud_tex) SDL_DestroyTexture(hud_tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

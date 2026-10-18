@@ -38,6 +38,10 @@ struct VideoPlayer {
     // True if at least one frame has been uploaded to the texture.
     bool ready() const { return ready_.load(); }
 
+    // Explicit cleanup. Must be called before SDL_Quit() because
+    // texture destruction requires a live renderer. Idempotent.
+    void shutdown();
+
     // Total unique frames uploaded to the texture since request().
     // Used by probes and by gameplay to measure actual delivered fps.
     uint64_t frames_delivered() const { return frames_delivered_.load(); }
@@ -62,7 +66,8 @@ private:
 
     // Latest decoded frame slot (worker writes, main reads under frame_mu_)
     std::mutex           frame_mu_;
-    std::vector<uint8_t> frame_data_;
+    std::vector<uint8_t> frame_data_;   // worker writes here
+    std::vector<uint8_t> upload_data_;  // main drains here; swaps with frame_data_
     int                  frame_w_ = 0;
     int                  frame_h_ = 0;
     bool                 frame_pending_ = false;

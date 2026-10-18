@@ -150,6 +150,18 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
                     }
                 }
             }
+            // Video event: Video,<offset>,"filename.mp4"
+            // The offset field is discarded (lazer does the same).
+            if (out.video_file.empty() &&
+                t.size() >= 6 && t.compare(0, 6, "Video,") == 0) {
+                auto q1 = t.find('"');
+                if (q1 != std::string::npos) {
+                    auto q2 = t.find('"', q1 + 1);
+                    if (q2 != std::string::npos && q2 > q1 + 1) {
+                        out.video_file = t.substr(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+            }
         }
         else if (section == "HitObjects") {
             std::vector<std::string> parts;

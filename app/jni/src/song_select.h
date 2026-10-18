@@ -14,6 +14,7 @@ struct SongEntry {
     std::string version;     // difficulty name
     std::string audio_path;  // absolute path to audio file (or "" if missing)
     std::string bg_path;     // absolute path to bg image (or "" if missing)
+    std::string video_path;  // absolute path to video (or "" if missing)
     int         key_count;
     double      od;
     int         preview_time = -1;  // ms; -1 = unset
