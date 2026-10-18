@@ -205,3 +205,30 @@ Each session has a clear deliverable and can be verified in isolation.
 - Not a port of `VideoDecoder.cs`. That file is 1002 lines of hardware
   decode + error recovery + texture pooling + backend abstraction. We
   ship a simpler software-only version and extend if needed.
+
+
+## Build verification (session 2)
+
+FFmpeg n7.0 cross-compiled on first attempt with `build-ffmpeg.sh`.
+Configure flags as documented.
+
+Artifacts in `app/jni/ffmpeg/lib/` (unlinked):
+
+| Library | Size |
+|---|---|
+| libavcodec.a | 19 MB |
+| libavformat.a | 4.2 MB |
+| libavutil.a | 4.1 MB |
+| libswscale.a | 4.6 MB |
+| libswresample.a | 555 KB |
+| **Total** | **~34 MB** |
+
+Architecture verified: extracting a member from `libavcodec.a` and
+running `file` reports `ELF 64-bit LSB relocatable, ARM aarch64`.
+Note: `file` on the `.a` itself reports `current ar archive`, not
+`ELF` — the ELF metadata is per-member, not per-archive.
+
+Sizes above are **pre-link**. The final binary pulls only the symbols
+we call. Given `--disable-everything` + three demuxers + five decoders,
+expected real APK delta is 2-4 MB. Measured in session 3 when CMake
+actually links.
