@@ -8,6 +8,9 @@ struct Note {
     double time;      // ms
     bool is_hold;
     int  hit_sound;   // bitfield: 1=normal, 2=whistle, 4=finish, 8=clap
+    int  source_type = 1;  // raw type field: 1=circle, 2=slider, 8=spinner (bitmask)
+    float source_x = 0.f;  // raw X (0..512). Fractional in osu file format v14+.
+    float source_y = 0.f;  // raw Y (0..384). Used by converter for 2D pos separation.
     int  sample_bank; // 0=auto, 1=normal, 2=soft, 3=drum (for hitnormal)
     int  sample_bank_addition = 0;  // 0=inherit from sample_bank; else 1/2/3
     std::string sample_suffix;  // custom sample index from field 6, "" if none
@@ -28,6 +31,13 @@ struct Beatmap {
     int mode = 0;   // 0=std, 1=taiko, 2=catch, 3=mania
     int key_count = 0;
     double od = 5.0;
+    double drain_rate = 5.0;      // HPDrainRate (field 1 of [Difficulty])
+    double approach_rate = -1.0;  // ApproachRate; -1 means "inherit from OD" (osu format default)
+    // Hit-object type counts, populated during parse. Used by the mania
+    // converter for column-count heuristic (EndTimeObjectCount in lazer).
+    int circle_count = 0;
+    int slider_count = 0;
+    int spinner_count = 0;
     double bpm = 0.0;
     std::string title;
     std::string artist;

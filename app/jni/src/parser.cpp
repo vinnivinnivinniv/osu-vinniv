@@ -127,6 +127,12 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
             else if (k == "OverallDifficulty") {
                 try { out.od = std::stod(v); } catch (...) {}
             }
+            else if (k == "HPDrainRate") {
+                try { out.drain_rate = std::stod(v); } catch (...) {}
+            }
+            else if (k == "ApproachRate") {
+                try { out.approach_rate = std::stod(v); } catch (...) {}
+            }
         }
         else if (section == "Events") {
             // Relevant event types:
@@ -172,11 +178,25 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
 
             Note n{};
             try {
-                int raw_x = std::stoi(parts[0]);
+                // X is fractional in osu file format v14+. Parsing as int
+                // truncates 85.5 to 85, which shifts the converted mania
+                // column when 85.5 crosses a (512/N) boundary.
+                float raw_x_f = std::stof(parts[0]);
+                int   raw_x   = (int)raw_x_f;
+                float raw_y_f = std::stof(parts[1]);
                 n.time    = std::stod(parts[2]);
                 int type  = std::stoi(parts[3]);
+                n.source_type = type & 0x0B;   // keep bits 0(circle)/1(slider)/3(spinner)
+                n.source_x    = raw_x_f;
+                n.source_y    = raw_y_f;
                 n.is_hold = (type & 128) != 0;
                 n.end_time = n.time;
+                // Type counts for converter column heuristic. bit 0=circle,
+                // bit 1=slider, bit 3=spinner. In osu file format these are
+                // mutually exclusive for a given object.
+                if (type & 1) out.circle_count++;
+                if (type & 2) out.slider_count++;
+                if (type & 8) out.spinner_count++;
                 n.column = raw_x;
                 if (parts.size() >= 5)
                     n.hit_sound = std::stoi(parts[4]);
@@ -254,6 +274,9 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
 
     std::sort(out.notes.begin(), out.notes.end(),
               [](const Note& a, const Note& b) { return a.time < b.time; });
+
+    // osu format default: if ApproachRate is absent, it inherits from OD.
+    if (out.approach_rate < 0.0) out.approach_rate = out.od;
 
     std::sort(out.timing_points.begin(), out.timing_points.end(),
               [](const TimingPoint& a, const TimingPoint& b){ return a.time < b.time; });
