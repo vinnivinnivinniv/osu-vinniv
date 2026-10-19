@@ -17,6 +17,7 @@ struct SongEntry {
     std::string video_path;  // absolute path to video (or "" if missing)
     int         key_count;
     int         original_mode = 3;  // 0=std, 1=taiko, 2=catch, 3=mania
+    double      stars = 0.0;        // placeholder star rating (see read_meta)
     double      od;
     int         preview_time = -1;  // ms; -1 = unset
 };

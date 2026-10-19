@@ -12,6 +12,7 @@
 #include "preview_player.h"
 #include "video_decode.h"
 #include "video_player.h"
+#include "converter.h"
 #include "image_load.h"
 #include "map_sample_bank.h"
 #include "bundled_sounds.h"
@@ -1269,22 +1270,17 @@ int main(int argc, char* argv[]) {
                             if (!parse_osu_file(s.osu_path, new_map)) {
                                 SDL_Log("SONGS: parse failed");
                             } else {
-                                // Placeholder converter: non-mania maps
-                                // become 4K by mapping X (0-511) to
-                                // column (0-3). Sliders/spinners arrive
-                                // as taps; not faithful, just playable.
-                                // Real converter lands per docs/mechanics.md.
+                                // Convert non-mania maps via converter.cpp.
+                                // Currently: deterministic column count from
+                                // difficulty + seeded RNG column assignment.
+                                // Real pattern generators are follow-up work
+                                // (see docs/mechanics.md).
                                 if (new_map.mode != 3) {
-                                    int cols = 4;
-                                    for (auto& n : new_map.notes) {
-                                        int c = (int)((double)n.column / 128.0);
-                                        if (c < 0) c = 0;
-                                        if (c > cols - 1) c = cols - 1;
-                                        n.column = c;
-                                    }
-                                    new_map.key_count = cols;
+                                    int old_mode = new_map.mode;
+                                    convert_to_mania(new_map);
                                     SDL_Log("CONVERT: mode=%d -> %dK, %zu notes",
-                                            new_map.mode, cols, new_map.notes.size());
+                                            old_mode, new_map.key_count,
+                                            new_map.notes.size());
                                 }
                                 map = new_map;
                                 rebuild_timing_positions();
@@ -2450,7 +2446,8 @@ int main(int argc, char* argv[]) {
                     const char* conv_tag = (songs[i].original_mode != 3) ? "[Conv] " : "";
                     SDL_snprintf(line1, sizeof(line1), "%s[%dK] %s",
                                  conv_tag, songs[i].key_count, songs[i].title.c_str());
-                    SDL_snprintf(line2, sizeof(line2), "%s   [%s]  OD%.1f",
+                    SDL_snprintf(line2, sizeof(line2), "*%.2f  %s   [%s]  OD%.1f",
+                                 songs[i].stars,
                                  songs[i].artist.c_str(),
                                  songs[i].version.c_str(),
                                  songs[i].od);

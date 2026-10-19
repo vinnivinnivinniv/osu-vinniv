@@ -2,6 +2,7 @@
 #include <SDL3/SDL.h>
 #include "parser.h"
 #include "song_cache.h"
+#include "converter.h"
 #include "osz_import.h"
 #include <atomic>
 #include <mutex>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <ctime>
+#include <cmath>
 #include <cctype>
 #include <cstring>
 
@@ -37,7 +39,9 @@ static std::string join(const std::string& a, const std::string& b) {
 // Uses the full parser but ignores HitObjects count.
 static bool read_meta(const std::string& osu_path, SongEntry& e) {
     Beatmap m;
-    if (!parse_osu_file(osu_path, m, /* metadata_only = */ true)) return false;
+    // Full parse (not metadata-only) so we have notes for star
+    // computation. Slower scan but accurate density-based ratings.
+    if (!parse_osu_file(osu_path, m, /* metadata_only = */ false)) return false;
 
     // Accept all modes. Display filter (Show converts toggle in main.cpp)
     // hides non-mania entries by default. Playback of converts uses a
@@ -51,7 +55,33 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     e.od        = m.od;
     e.preview_time = m.preview_time;
     e.original_mode = m.mode;
-    if (m.mode != 3) e.key_count = 4;   // placeholder: 4K for all converts
+    if (m.mode != 3) {
+        // Compute the column count the converter will actually use.
+        // Same heuristic runs at play time; this keeps display and
+        // play consistent.
+        e.key_count = preview_column_count(m);
+    }
+
+    // Placeholder star rating. NOT the real osu! diffcalc (see
+    // docs/mechanics.md for the port plan). Rough approximation from
+    // note density + OD + key count. Real diffcalc is weeks of work.
+    if (m.notes.size() >= 2) {
+        double first_t = m.notes.front().time;
+        double last_t  = 0.0;
+        for (const auto& n : m.notes) {
+            if (n.end_time > last_t) last_t = n.end_time;
+        }
+        double dur_s = (last_t - first_t) / 1000.0;
+        if (dur_s < 1.0) dur_s = 1.0;
+        double nps = (double)m.notes.size() / dur_s;
+        double s = 0.5
+                 + std::sqrt(nps) * 1.3
+                 + (m.od - 5.0) * 0.1
+                 + (e.key_count - 4) * 0.08;
+        if (s < 0.5)  s = 0.5;
+        if (s > 12.0) s = 12.0;
+        e.stars = s;
+    }
 
     // Resolve audio path relative to the .osu folder
     std::string folder = osu_path;
@@ -223,6 +253,9 @@ std::vector<SongEntry> scan_songs(const std::string& root,
         // Cache file is written before the cold-path sort, so it holds
         // scan order. Sort here so warm loads match cold loads.
         std::sort(cached.begin(), cached.end(), [](const SongEntry& a, const SongEntry& b) {
+            double sa = std::round(a.stars * 100.0) / 100.0;
+            double sb = std::round(b.stars * 100.0) / 100.0;
+            if (sa != sb) return sa < sb;
             if (a.title  != b.title)  return a.title  < b.title;
             if (a.artist != b.artist) return a.artist < b.artist;
             return a.version < b.version;
@@ -304,6 +337,9 @@ std::vector<SongEntry> scan_songs(const std::string& root,
 
     // Primary sort: title (lazer default), then artist, then difficulty.
     std::sort(out.begin(), out.end(), [](const SongEntry& a, const SongEntry& b) {
+        double sa = std::round(a.stars * 100.0) / 100.0;
+        double sb = std::round(b.stars * 100.0) / 100.0;
+        if (sa != sb) return sa < sb;
         if (a.title  != b.title)  return a.title  < b.title;
         if (a.artist != b.artist) return a.artist < b.artist;
         return a.version < b.version;

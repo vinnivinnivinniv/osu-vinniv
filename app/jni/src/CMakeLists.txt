@@ -22,6 +22,8 @@ add_library(main SHARED
     preview_player.cpp
     video_decode.cpp
     video_player.cpp
+    converter.cpp
+    converter_legacy.cpp
     ${MINIZ_DIR}/miniz.c
     ${MINIZ_DIR}/miniz_tdef.c
     ${MINIZ_DIR}/miniz_tinfl.c
