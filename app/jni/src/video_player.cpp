@@ -60,25 +60,37 @@ void VideoPlayer::stop() {
 
 void VideoPlayer::tick() {
     int w = 0, h = 0;
+    bool is_yuv = false;
+    int sy = 0, su = 0, sv = 0, srgba = 0;
+    size_t y_sz = 0, u_sz = 0, v_sz = 0;
+
     {
         std::lock_guard<std::mutex> lk(frame_mu_);
         if (!frame_pending_) return;
         std::swap(frame_data_, upload_data_);
         w = frame_w_;
         h = frame_h_;
+        is_yuv = frame_is_yuv_;
+        sy = frame_stride_y_;
+        su = frame_stride_u_;
+        sv = frame_stride_v_;
+        y_sz = frame_y_size_;
+        u_sz = frame_u_size_;
+        v_sz = frame_v_size_;
+        srgba = frame_stride_rgba_;
         frame_pending_ = false;
     }
 
-    // Ping-pong: render from the texture updated last frame while uploading
-    // to the other. Breaks the Adreno UnlockTexture GPU-sync stall caused by
-    // re-locking an in-use texture.
     int upload_idx = 1 - tex_index_;
     SDL_Texture* upload_tex = textures_[upload_idx];
 
-    if (!textures_[0] || !textures_[1] || tex_w_ != w || tex_h_ != h) {
+    // Recreate textures if dimensions or format changed.
+    if (!textures_[0] || !textures_[1]
+        || tex_w_ != w || tex_h_ != h || tex_is_yuv_ != is_yuv) {
+        SDL_PixelFormat fmt = is_yuv ? SDL_PIXELFORMAT_IYUV : SDL_PIXELFORMAT_RGBA32;
         for (int i = 0; i < 2; i++) {
             if (textures_[i]) SDL_DestroyTexture(textures_[i]);
-            textures_[i] = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32,
+            textures_[i] = SDL_CreateTexture(renderer_, fmt,
                                              SDL_TEXTUREACCESS_STREAMING, w, h);
             if (textures_[i]) SDL_SetTextureBlendMode(textures_[i], SDL_BLENDMODE_BLEND);
         }
@@ -88,27 +100,43 @@ void VideoPlayer::tick() {
         }
         tex_w_ = w;
         tex_h_ = h;
+        tex_is_yuv_ = is_yuv;
         upload_tex = textures_[upload_idx];
     }
 
-    void* pixels = nullptr;
-    int pitch = 0;
-    if (!SDL_LockTexture(upload_tex, nullptr, &pixels, &pitch)) {
-        SDL_Log("VIDEO_PLAYER: SDL_LockTexture failed: %s", SDL_GetError());
-        return;
+    if (is_yuv) {
+        // YUV upload — SDL_UpdateYUVTexture internally handles pitch
+        // mismatch. Total bytes = y_sz + u_sz + v_sz (1.5 bytes/pixel vs
+        // 4 for RGBA).
+        bool ok = SDL_UpdateYUVTexture(upload_tex, nullptr,
+                                        upload_data_.data(),     sy,
+                                        upload_data_.data()+y_sz, su,
+                                        upload_data_.data()+y_sz+u_sz, sv);
+        if (!ok) {
+            SDL_Log("VIDEO_PLAYER: UpdateYUVTexture failed: %s", SDL_GetError());
+            return;
+        }
+    } else {
+        // RGBA fallback with LockTexture + memcpy.
+        void* pixels = nullptr;
+        int pitch = 0;
+        if (!SDL_LockTexture(upload_tex, nullptr, &pixels, &pitch)) {
+            SDL_Log("VIDEO_PLAYER: LockTexture failed: %s", SDL_GetError());
+            return;
+        }
+        int row_bytes = w * 4;
+        const uint8_t* src_px = upload_data_.data();
+        if (pitch == row_bytes) {
+            memcpy(pixels, src_px, (size_t)row_bytes * h);
+        } else {
+            uint8_t* dst = (uint8_t*)pixels;
+            for (int y = 0; y < h; y++) {
+                memcpy(dst + y*pitch, src_px + y*row_bytes, row_bytes);
+            }
+        }
+        SDL_UnlockTexture(upload_tex);
     }
 
-    int row_bytes = w * 4;
-    const uint8_t* src_px = upload_data_.data();
-    if (pitch == row_bytes) {
-        memcpy(pixels, src_px, (size_t)row_bytes * h);
-    } else {
-        uint8_t* dst = (uint8_t*)pixels;
-        for (int y = 0; y < h; y++) {
-            memcpy(dst + y * pitch, src_px + y * row_bytes, row_bytes);
-        }
-    }
-    SDL_UnlockTexture(upload_tex);
     tex_index_ = upload_idx;
     ready_.store(true);
     frames_delivered_.fetch_add(1);
@@ -231,9 +259,28 @@ void VideoPlayer::worker_loop() {
         // Post to shared frame slot
         {
             std::lock_guard<std::mutex> lk(frame_mu_);
-            size_t bytes = (size_t)f.stride * f.height;
-            frame_data_.resize(bytes);
-            memcpy(frame_data_.data(), f.data, bytes);
+            if (f.is_yuv) {
+                size_t ys = (size_t)f.stride_y * f.height;
+                size_t us = (size_t)f.stride_u * (f.height / 2);
+                size_t vs = (size_t)f.stride_v * (f.height / 2);
+                frame_data_.resize(ys + us + vs);
+                memcpy(frame_data_.data(),          f.data_y, ys);
+                memcpy(frame_data_.data() + ys,     f.data_u, us);
+                memcpy(frame_data_.data() + ys+us,  f.data_v, vs);
+                frame_stride_y_ = f.stride_y;
+                frame_stride_u_ = f.stride_u;
+                frame_stride_v_ = f.stride_v;
+                frame_y_size_ = ys;
+                frame_u_size_ = us;
+                frame_v_size_ = vs;
+                frame_is_yuv_ = true;
+            } else {
+                size_t bytes = (size_t)f.stride_rgba * f.height;
+                frame_data_.resize(bytes);
+                memcpy(frame_data_.data(), f.data_rgba, bytes);
+                frame_stride_rgba_ = f.stride_rgba;
+                frame_is_yuv_ = false;
+            }
             frame_w_ = f.width;
             frame_h_ = f.height;
             frame_pending_ = true;

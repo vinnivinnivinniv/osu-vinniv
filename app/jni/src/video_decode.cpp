@@ -33,8 +33,11 @@ struct VideoDecoder {
     double           time_base_ms = 0.0;
     bool             eof = false;
 
-    // RGBA output buffer — reused across frames, grows on dimension change.
+    // Output buffer — reused across frames, grows on dimension change.
+    // Holds either RGBA (out_cap = stride*h) or packed YUV420P
+    // (out_cap = y_size + u_size + v_size).
     uint8_t* out_buf = nullptr;
+    size_t   out_cap = 0;
     int      out_w = 0, out_h = 0, out_stride = 0;
 };
 
@@ -120,17 +123,68 @@ int video_decoder_read_frame(VideoDecoder* d, VideoFrame* out) {
         // Try to pull a decoded frame first. If EAGAIN, need more input.
         int ret = avcodec_receive_frame(d->codec, d->frame);
         if (ret == 0) {
-            // Got a frame. Convert to RGBA32.
             int w = d->frame->width;
             int h = d->frame->height;
+            int src_fmt = (int)d->frame->format;
 
-            if (!d->out_buf || d->out_w != w || d->out_h != h) {
+            // --- YUV fast path: source is already YUV420P/420J ---
+            // Skip swscale entirely. Copy 3 planes into out_buf packed.
+            // YUV420P layout: Y[h][stride_y], U[h/2][stride_u], V[h/2][stride_v].
+            if (src_fmt == AV_PIX_FMT_YUV420P || src_fmt == AV_PIX_FMT_YUVJ420P) {
+                int sy = d->frame->linesize[0];
+                int su = d->frame->linesize[1];
+                int sv = d->frame->linesize[2];
+                size_t y_size = (size_t)sy * h;
+                size_t u_size = (size_t)su * (h / 2);
+                size_t v_size = (size_t)sv * (h / 2);
+                size_t total  = y_size + u_size + v_size;
+
+                if (!d->out_buf || d->out_cap < total) {
+                    free(d->out_buf);
+                    d->out_buf = (uint8_t*)malloc(total);
+                    d->out_cap = d->out_buf ? total : 0;
+                    d->out_w = w; d->out_h = h;
+                }
+                if (!d->out_buf) { SDL_Log("VIDEO: YUV buf alloc failed"); return -1; }
+
+                memcpy(d->out_buf,                     d->frame->data[0], y_size);
+                memcpy(d->out_buf + y_size,            d->frame->data[1], u_size);
+                memcpy(d->out_buf + y_size + u_size,   d->frame->data[2], v_size);
+
+                int64_t ts = d->frame->best_effort_timestamp;
+                if (ts == AV_NOPTS_VALUE) ts = d->frame->pts;
+                int64_t start = d->stream->start_time;
+                if (start == AV_NOPTS_VALUE) start = 0;
+
+                out->is_yuv     = true;
+                out->data_y     = d->out_buf;
+                out->data_u     = d->out_buf + y_size;
+                out->data_v     = d->out_buf + y_size + u_size;
+                out->stride_y   = sy;
+                out->stride_u   = su;
+                out->stride_v   = sv;
+                out->width      = w;
+                out->height     = h;
+                out->pts_ms     = (double)(ts - start) * d->time_base_ms;
+                out->data_rgba  = nullptr;
+                out->stride_rgba = 0;
+
+                av_frame_unref(d->frame);
+                return 1;
+            }
+
+            // --- RGBA fallback: swscale to RGBA32 ---
+            // Got a frame. Convert to RGBA32.
+
+            size_t rgba_cap = (size_t)w * 4 * h;
+            if (!d->out_buf || d->out_cap < rgba_cap) {
                 free(d->out_buf);
+                d->out_buf = (uint8_t*)malloc(rgba_cap);
+                d->out_cap = d->out_buf ? rgba_cap : 0;
                 d->out_w = w; d->out_h = h;
                 d->out_stride = w * 4;
-                d->out_buf = (uint8_t*)malloc((size_t)d->out_stride * h);
-                if (!d->out_buf) { SDL_Log("VIDEO: RGBA buffer alloc failed"); return -1; }
             }
+            if (!d->out_buf) { SDL_Log("VIDEO: RGBA buf alloc failed"); return -1; }
 
             if (!d->sws || d->sws_src_fmt != (int)d->frame->format) {
                 if (d->sws) sws_freeContext(d->sws);
@@ -152,10 +206,11 @@ int video_decoder_read_frame(VideoDecoder* d, VideoFrame* out) {
             int64_t start = d->stream->start_time;
             if (start == AV_NOPTS_VALUE) start = 0;
             out->pts_ms = (double)(ts - start) * d->time_base_ms;
-            out->data   = d->out_buf;
-            out->width  = w;
-            out->height = h;
-            out->stride = d->out_stride;
+            out->is_yuv     = false;
+            out->data_rgba  = d->out_buf;
+            out->stride_rgba = d->out_stride;
+            out->width      = w;
+            out->height     = h;
 
             av_frame_unref(d->frame);
             return 1;
@@ -244,9 +299,12 @@ extern "C" int video_decoder_probe(const char* path) {
     while (count < 5) {
         int r = video_decoder_read_frame(d, &f);
         if (r <= 0) break;
-        SDL_Log("VIDEO: frame %d  %dx%d  pts=%.1f ms  px[0]=%02X%02X%02X%02X",
+        const uint8_t* px = f.is_yuv ? f.data_y : f.data_rgba;
+        SDL_Log("VIDEO: frame %d  %dx%d  pts=%.1f ms  %s  px[0]=%02X%02X%02X%02X",
                 count, f.width, f.height, f.pts_ms,
-                f.data[0], f.data[1], f.data[2], f.data[3]);
+                f.is_yuv ? "YUV" : "RGBA",
+                px ? px[0] : 0, px ? px[1] : 0,
+                px ? px[2] : 0, px ? px[3] : 0);
         count++;
     }
     SDL_Log("VIDEO: decoded %d frames from %s", count, path);

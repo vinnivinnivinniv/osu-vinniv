@@ -892,6 +892,12 @@ int main(int argc, char* argv[]) {
     bool   paused   = false;
     bool   resuming = false;
     bool   result_shown = false;
+    // Rendered autoplay mode (test_replay.txt). Full render loop runs,
+    // presses injected at exact note times. Feeds the frame-time log
+    // without needing a human at the screen.
+    bool   autoplay_replay_active = false;
+    size_t autoplay_replay_idx    = 0;
+    Uint64 autoplay_replay_start  = 0;
     Uint64 pause_started_tick = 0;
     Uint64 resume_start_tick  = 0;
     const Uint64 RESUME_DELAY_MS = 3000;
@@ -1042,6 +1048,233 @@ int main(int argc, char* argv[]) {
                     map.notes.size(), hold_count, expected_perfect, cnt_perfect,
                     cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss, max_combo, acc);
             return pass ? 0 : 1;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Rendered autoplay. Triggered by test_replay.txt containing a single
+    // line: /path/to/map.osu. Loads the map, queues audio, enters Playing,
+    // and injects presses at each note's exact time. Normal render loop
+    // runs so frame-time logs capture real playback behaviour with video.
+    // Exits automatically after last_note_end + 2s, prints REPLAY_RESULT.
+    // ---------------------------------------------------------------------
+    {
+        const char* replay_trigger = "/sdcard/Android/data/sh.ppy.osuvinniv/files/test_replay.txt";
+        FILE* rtf = fopen(replay_trigger, "r");
+        if (rtf) {
+            char rbuf[1024] = {0};
+            if (fgets(rbuf, sizeof(rbuf), rtf)) {
+                size_t rl = strlen(rbuf);
+                while (rl > 0 && (rbuf[rl-1]=='\n' || rbuf[rl-1]=='\r')) rbuf[--rl] = 0;
+            }
+            fclose(rtf);
+            remove(replay_trigger);
+
+            SDL_Log("REPLAY: autoplay on %s", rbuf);
+            Beatmap rm;
+            if (!parse_osu_file(rbuf, rm, false)) {
+                SDL_Log("REPLAY_RESULT: FAIL parse '%s'", rbuf);
+                return 1;
+            }
+            map = rm;
+            rebuild_timing_positions();
+
+            last_note_end = 0.0;
+            hold_count = 0;
+            for (const auto& n : map.notes) {
+                if (n.end_time > last_note_end) last_note_end = n.end_time;
+                if (n.is_hold) hold_count++;
+            }
+            note_judged.assign(map.notes.size(), false);
+            note_hit_time.assign(map.notes.size(), -1.0);
+            hold_active.assign(map.notes.size(), false);
+            hold_started.assign(map.notes.size(), false);
+            hold_broken.assign(map.notes.size(), false);
+            note_ghost.assign(map.notes.size(), false);
+            release_time.assign(map.notes.size(), 0.0);
+            for (int j = 0; j < 16; j++) column_pressed[j] = false;
+            active_holds.clear();
+            active_fingers.clear();
+            combo = 0; max_combo = 0;
+            cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+            cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+            miss_cursor = 0;
+            paused = false; resuming = false; result_shown = false;
+
+            // Load audio (map's declared audio file, resolved relative to .osu)
+            std::string rmap_folder = rbuf;
+            auto rslash = rmap_folder.find_last_of('/');
+            if (rslash != std::string::npos) rmap_folder = rmap_folder.substr(0, rslash + 1);
+            else rmap_folder.clear();
+            std::string raudio = rmap_folder + map.audio_file;
+            if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
+            if (wav_data) { SDL_free(wav_data); wav_data = nullptr; }
+            SDL_AudioSpec rspec = {};
+            if (!load_audio_to_pcm(raudio.c_str(), &rspec, &wav_data, &wav_len)) {
+                SDL_Log("REPLAY: audio load failed: %s", raudio.c_str());
+            } else {
+                audio_stream = SDL_OpenAudioDeviceStream(
+                    SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &rspec, nullptr, nullptr);
+                if (audio_stream) SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
+            }
+
+            audio_queued = false;
+            audio_start_tick = SDL_GetTicks() + 2000;
+            audio_drift_ms = 0.0;
+            compute_geometry();
+            app_state = AppState::Playing;
+
+            autoplay_replay_active = true;
+            autoplay_replay_idx = 0;
+            autoplay_replay_start = SDL_GetTicks();
+
+            SDL_Log("REPLAY: entering Playing (%dK, %zu notes, %d holds)",
+                    map.key_count, map.notes.size(), hold_count);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Video texture upload micro-benchmark. Triggered by presence of
+    // test_video_bench.txt (empty file OK). Runs 1000 iterations of the
+    // same SDL_LockTexture -> memcpy -> SDL_UnlockTexture path used by
+    // VideoPlayer::tick(), with double-buffering identical to production.
+    // Measures per-cycle time without vblank anchoring, without gameplay,
+    // without audio. Isolates the texture path from everything else.
+    //
+    // Expected: if this is the ~5ms cost, per-cycle should show ~5-8ms.
+    // If double-buffering fixed it, per-cycle should be ~0.3-1ms.
+    // ---------------------------------------------------------------------
+    {
+        const char* vb_trigger = "/sdcard/Android/data/sh.ppy.osuvinniv/files/test_video_bench.txt";
+        FILE* vbf = fopen(vb_trigger, "r");
+        if (vbf) {
+            fclose(vbf);
+            remove(vb_trigger);
+
+            // Standard 720p video frame — matches most osu! videos.
+            const int bw = 1280, bh = 720;
+            const int bstride = bw * 4;
+            std::vector<uint8_t> src_px((size_t)bstride * bh, 0x80);  // grey
+            std::vector<uint8_t> dst0((size_t)bstride * bh, 0x80);    // for upload_data_
+
+            SDL_Texture* bt[2] = { nullptr, nullptr };
+            for (int i = 0; i < 2; i++) {
+                bt[i] = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
+                                          SDL_TEXTUREACCESS_STREAMING, bw, bh);
+                if (bt[i]) SDL_SetTextureBlendMode(bt[i], SDL_BLENDMODE_BLEND);
+            }
+            if (!bt[0] || !bt[1]) {
+                SDL_Log("VBENCH_RESULT: FAIL texture create: %s", SDL_GetError());
+                return 1;
+            }
+
+            const int N = 1000;
+            std::vector<double> times(N);
+            int upload_idx = 0;
+
+            SDL_Log("VBENCH: RGBA phase starting %d iterations", N);
+            Uint64 total_start = SDL_GetTicksNS();
+            for (int i = 0; i < N; i++) {
+                if ((i % 100) == 0) SDL_Log("VBENCH: iter %d", i);
+                Uint64 t0 = SDL_GetTicksNS();
+                int idx = 1 - upload_idx;
+                void* pixels = nullptr;
+                int pitch = 0;
+                if (!SDL_LockTexture(bt[idx], nullptr, &pixels, &pitch)) {
+                    SDL_Log("VBENCH_RESULT: FAIL LockTexture at i=%d: %s", i, SDL_GetError());
+                    for (int k = 0; k < 2; k++) if (bt[k]) SDL_DestroyTexture(bt[k]);
+                    return 1;
+                }
+                if (pitch == bstride) {
+                    memcpy(pixels, src_px.data(), (size_t)bstride * bh);
+                } else {
+                    uint8_t* dst = (uint8_t*)pixels;
+                    for (int y = 0; y < bh; y++)
+                        memcpy(dst + y * pitch, src_px.data() + y * bstride, bstride);
+                }
+                SDL_UnlockTexture(bt[idx]);
+                upload_idx = idx;
+                Uint64 t1 = SDL_GetTicksNS();
+                times[i] = (t1 - t0) / 1e6;  // ns -> ms
+            }
+            Uint64 total_elapsed = SDL_GetTicksNS() - total_start;
+
+            // Sort for percentiles
+            std::vector<double> sorted = times;
+            std::sort(sorted.begin(), sorted.end());
+            double avg = 0.0;
+            for (double v : times) avg += v;
+            avg /= N;
+            double p50 = sorted[N / 2];
+            double p99 = sorted[(N * 99) / 100];
+            double p100 = sorted[N - 1];
+
+            SDL_Log("VBENCH: RGBA phase done, YUV phase starting");
+            SDL_Log("VBENCH_RGBA_RESULT: n=%d  per_cycle_ms avg=%.3f p50=%.3f p99=%.3f max=%.3f  total_ms=%.1f  mb_per_sec=%.0f",
+                    N, avg, p50, p99, p100,
+                    total_elapsed / 1e6,
+                    (double)N * bstride * bh / (total_elapsed / 1e9) / 1e6);
+
+            for (int k = 0; k < 2; k++) if (bt[k]) SDL_DestroyTexture(bt[k]);
+
+            // --- YUV benchmark (same N, same dimensions, IYUV format) ---
+            // YUV420P: Y is w*h bytes, U and V are (w/2)*(h/2) each.
+            const int yuv_y_size = bw * bh;
+            const int yuv_uv_size = (bw/2) * (bh/2);
+            std::vector<uint8_t> yuv_y(yuv_y_size, 0x80);
+            std::vector<uint8_t> yuv_u(yuv_uv_size, 0x80);
+            std::vector<uint8_t> yuv_v(yuv_uv_size, 0x80);
+
+            SDL_Texture* bt_yuv[2] = { nullptr, nullptr };
+            for (int i = 0; i < 2; i++) {
+                bt_yuv[i] = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_IYUV,
+                                              SDL_TEXTUREACCESS_STREAMING, bw, bh);
+                if (bt_yuv[i]) SDL_SetTextureBlendMode(bt_yuv[i], SDL_BLENDMODE_BLEND);
+            }
+            if (!bt_yuv[0] || !bt_yuv[1]) {
+                SDL_Log("VBENCH_YUV_RESULT: FAIL texture create: %s", SDL_GetError());
+                return 1;
+            }
+
+            std::vector<double> yuv_times(N);
+            int yuv_upload_idx = 0;
+
+            Uint64 yuv_total_start = SDL_GetTicksNS();
+            for (int i = 0; i < N; i++) {
+                Uint64 t0 = SDL_GetTicksNS();
+                int idx = 1 - yuv_upload_idx;
+                bool ok = SDL_UpdateYUVTexture(bt_yuv[idx], nullptr,
+                                                yuv_y.data(), bw,
+                                                yuv_u.data(), bw/2,
+                                                yuv_v.data(), bw/2);
+                if (!ok) {
+                    SDL_Log("VBENCH_YUV_RESULT: FAIL at i=%d: %s", i, SDL_GetError());
+                    for (int k = 0; k < 2; k++) if (bt_yuv[k]) SDL_DestroyTexture(bt_yuv[k]);
+                    return 1;
+                }
+                yuv_upload_idx = idx;
+                Uint64 t1 = SDL_GetTicksNS();
+                yuv_times[i] = (t1 - t0) / 1e6;
+            }
+            Uint64 yuv_total_elapsed = SDL_GetTicksNS() - yuv_total_start;
+
+            std::vector<double> yuv_sorted = yuv_times;
+            std::sort(yuv_sorted.begin(), yuv_sorted.end());
+            double yuv_avg = 0.0;
+            for (double v : yuv_times) yuv_avg += v;
+            yuv_avg /= N;
+            double yuv_p50 = yuv_sorted[N / 2];
+            double yuv_p99 = yuv_sorted[(N * 99) / 100];
+            double yuv_p100 = yuv_sorted[N - 1];
+            size_t yuv_bytes_per_frame = (size_t)bw * bh * 3 / 2;  // IYUV = 1.5 bpp
+
+            SDL_Log("VBENCH_YUV_RESULT: n=%d  per_cycle_ms avg=%.3f p50=%.3f p99=%.3f max=%.3f  total_ms=%.1f  mb_per_sec=%.0f",
+                    N, yuv_avg, yuv_p50, yuv_p99, yuv_p100,
+                    yuv_total_elapsed / 1e6,
+                    (double)N * yuv_bytes_per_frame / (yuv_total_elapsed / 1e9) / 1e6);
+
+            for (int k = 0; k < 2; k++) if (bt_yuv[k]) SDL_DestroyTexture(bt_yuv[k]);
+            return 0;
         }
     }
 
@@ -1890,6 +2123,34 @@ int main(int argc, char* argv[]) {
         }
 
         // Background
+        // Autoplay-replay: inject presses for any notes whose time has
+        // arrived. Passing the exact note time to judge_col forces Perfect
+        // regardless of frame-to-frame jitter. Runs before hold completion
+        // and miss sweep so notes cannot be missed before being pressed.
+        if (autoplay_replay_active && app_state == AppState::Playing) {
+            while (autoplay_replay_idx < map.notes.size()
+                   && now_ms >= map.notes[autoplay_replay_idx].time) {
+                size_t i = autoplay_replay_idx;
+                judge_col(map.notes[i].column,
+                          (double)audio_start_tick + map.notes[i].time);
+                autoplay_replay_idx++;
+            }
+            if (!paused && !resuming && now_ms > last_note_end + 2000.0) {
+                long total = cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss;
+                double racc = total > 0
+                    ? (cnt_perfect*305.0 + cnt_300*300.0 + cnt_200*200.0
+                       + cnt_100*100.0 + cnt_50*50.0) / (total * 305.0) * 100.0
+                    : 0.0;
+                Uint64 elapsed_ms = SDL_GetTicks() - autoplay_replay_start;
+                SDL_Log("REPLAY_RESULT: notes=%zu holds=%d P=%d 300=%d 200=%d 100=%d 50=%d miss=%d combo=%d max=%d acc=%.2f wall_ms=%llu",
+                        map.notes.size(), hold_count,
+                        cnt_perfect, cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss,
+                        combo, max_combo, racc,
+                        (unsigned long long)elapsed_ms);
+                running = false;
+            }
+        }
+
         // Complete any holds whose tail has passed
         if (!paused) {
             double nmap = (double)SDL_GetTicks() - (double)audio_start_tick;

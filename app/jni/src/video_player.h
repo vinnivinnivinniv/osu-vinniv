@@ -72,6 +72,19 @@ private:
     int                  frame_h_ = 0;
     bool                 frame_pending_ = false;
 
+    // YUV metadata (only valid when frame_is_yuv_ is true)
+    bool                 frame_is_yuv_   = false;
+    int                  frame_stride_y_ = 0;
+    int                  frame_stride_u_ = 0;
+    int                  frame_stride_v_ = 0;
+    size_t               frame_y_size_   = 0;
+    size_t               frame_u_size_   = 0;
+    size_t               frame_v_size_   = 0;
+    // RGBA metadata (fallback)
+    int                  frame_stride_rgba_ = 0;
+    // Texture format the ping-pong pair is currently allocated for
+    bool                 tex_is_yuv_ = false;
+
     // Textures (main thread only)
     SDL_Texture* textures_[2] = { nullptr, nullptr };   // ping-pong
     int          tex_index_  = 0;                      // which we rendered last

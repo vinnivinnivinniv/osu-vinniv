@@ -8,11 +8,25 @@ struct VideoDecoder;
 // The data pointer is owned by the decoder and remains valid until the
 // next call to video_decoder_read_frame() or video_decoder_close().
 struct VideoFrame {
-    const uint8_t* data;
-    int            width;
-    int            height;
-    int            stride;   // bytes per row = width * 4
-    double         pts_ms;   // presentation timestamp in milliseconds
+    // RGBA path (fallback for exotic codecs: VP9, AV1, hardware formats
+    // that swscale must normalize). Width * 4 bytes per row.
+    const uint8_t* data_rgba   = nullptr;
+    int            stride_rgba = 0;
+
+    // YUV420P path (preferred — h264/mpeg4 come out of the decoder in
+    // this format natively; skipping swscale saves both worker CPU and
+    // texture upload bandwidth: 1.5 bytes/pixel vs 4 bytes/pixel).
+    const uint8_t* data_y = nullptr;
+    const uint8_t* data_u = nullptr;
+    const uint8_t* data_v = nullptr;
+    int            stride_y = 0;
+    int            stride_u = 0;
+    int            stride_v = 0;
+
+    int            width  = 0;
+    int            height = 0;
+    double         pts_ms = 0.0;
+    bool           is_yuv = false;
 };
 
 // extern "C" wrapper — keeps symbols unmangled so they can be dumped
