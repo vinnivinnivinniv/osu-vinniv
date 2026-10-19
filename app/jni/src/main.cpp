@@ -199,6 +199,7 @@ int main(int argc, char* argv[]) {
     float cfg_hitsound_vol = 1.0f;
     float cfg_scroll_speed = 1.5f;
     int   cfg_touch_layout = 0;  // 0=columns, 1=quadrants (4K only)
+    int   cfg_scroll_direction = 0;  // 0=down (notes fall), 1=up (notes rise)
     bool  cfg_show_converts = false;  // Show std/taiko/catch maps as converts
     int   cfg_fps_cap      = 120;   // 0 = uncapped
     float cfg_audio_offset_ms = 0.0f;
@@ -223,6 +224,7 @@ int main(int argc, char* argv[]) {
         { "FPS Cap",         1, &cfg_fps_cap,          0.0f,   0.0f,
             {"60","120","240","Uncapped"}, {60,120,240,0}, 4, 0 },
         { "Audio Offset",    0, &cfg_audio_offset_ms, -200.f, 200.f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
+        { "Scroll direction",1, &cfg_scroll_direction,  0.0f,   0.0f, {"down","up",nullptr,nullptr}, {0,1,0,0}, 2, 0 },
         { "Touch layout",    1, &cfg_touch_layout,     0.0f,   0.0f, {"columns","quadrants","screen",nullptr}, {0,1,2,0}, 3, 0 },
         { "4K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  4 },
         { "5K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  5 },
@@ -247,6 +249,7 @@ int main(int argc, char* argv[]) {
         fprintf(f, "hitsound_volume=%.3f\n", cfg_hitsound_vol);
         fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
         fprintf(f, "touch_layout=%d\n",       cfg_touch_layout);
+        fprintf(f, "scroll_direction=%d\n",   cfg_scroll_direction);
         fprintf(f, "show_converts=%d\n",      cfg_show_converts ? 1 : 0);
         fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
         fprintf(f, "audio_offset_ms=%.3f\n", cfg_audio_offset_ms);
@@ -296,6 +299,7 @@ int main(int argc, char* argv[]) {
                 else if (k == "hitsound_volume") cfg_hitsound_vol = std::stof(v);
                 else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
                 else if (k == "touch_layout")    cfg_touch_layout = std::stoi(v);
+                else if (k == "scroll_direction") cfg_scroll_direction = std::stoi(v);
                 else if (k == "show_converts")   cfg_show_converts = (std::stoi(v) != 0);
                 else if (k == "fps_cap")         cfg_fps_cap      = std::stoi(v);
                 else if (k == "audio_offset_ms") cfg_audio_offset_ms = std::stof(v);
@@ -484,7 +488,11 @@ int main(int argc, char* argv[]) {
         col_w       = (cwr > max_col_w) ? max_col_w : cwr;
         playfield_w = col_w * keys;
         playfield_x = ((float)win_w - playfield_w) * 0.5f;
-        judgement_y = win_h * 0.85f;
+        // Down: judgment near bottom (15% margin).
+        // Up:   judgment near top    (15% margin).
+        judgement_y = (cfg_scroll_direction == 1)
+                    ? (win_h * 0.15f)
+                    : (win_h * 0.85f);
 
         // osu scroll speed (1.0-40.0) -> pixels per millisecond
         double visible_height = (double)judgement_y;
@@ -499,6 +507,11 @@ int main(int argc, char* argv[]) {
     int   combo = 0, max_combo = 0;
     int   hold_count = 0;   // taps + 3*holds for score formula
     int   cnt_perfect = 0, cnt_300 = 0, cnt_200 = 0;
+    // Last judgement for on-playfield feedback. Updated by judge_col
+    // and the miss sweep; rendered with a fade near the judgement line.
+    int    last_judgement_tier  = -1;    // 0=P 1=Great 2=Good 3=OK 4=Meh 5=Miss
+    double last_judgement_time  = -1.0;  // SDL_GetTicks() when fired
+    int    last_judgement_delta = 0;     // +1 early, -1 late, 0 on-time/miss
     int   cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
     std::vector<bool>   hold_active(map.notes.size(), false);
@@ -751,6 +764,22 @@ int main(int argc, char* argv[]) {
             note_ghost[j] = true;
             cnt_miss++;
             play_miss_sound();
+        }
+
+        // Record for on-screen judgement display. d > 0 means the note
+        // was still in the future when pressed (early); d < 0 means the
+        // note had already passed (late).
+        {
+            int tier;
+            if      (a <= p_win)  tier = 0;
+            else if (a <= g_win)  tier = 1;
+            else if (a <= gd_win) tier = 2;
+            else if (a <= ok_win) tier = 3;
+            else if (a <= mh_win) tier = 4;
+            else                  tier = 5;
+            last_judgement_tier  = tier;
+            last_judgement_time  = (double)SDL_GetTicks();
+            last_judgement_delta = (d > 0.0) ? 1 : (d < 0.0 ? -1 : 0);
         }
 
         if      (a <= p_win)  cnt_perfect++;
@@ -2233,6 +2262,12 @@ int main(int argc, char* argv[]) {
                 note_judged[i] = true;
                 cnt_miss++;   // 1 miss regardless of tap/hold
                 combo = 0;
+                // Miss feedback for on-screen display. Auto-swept
+                // notes have no early/late — the note simply wasn't
+                // pressed within the miss window.
+                last_judgement_tier  = 5;
+                last_judgement_time  = (double)SDL_GetTicks();
+                last_judgement_delta = 0;
                 play_miss_sound();
             }
             miss_cursor++;
@@ -2295,13 +2330,12 @@ int main(int argc, char* argv[]) {
         // brighter on press. Layout-dependent.
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         {
-            // Sample brightness per region so boxes flash on input.
-            auto region_alpha = [&](bool pressed) -> Uint8 {
-                return pressed ? 90 : 20;
-            };
-            auto border_alpha = [&](bool pressed) -> Uint8 {
-                return pressed ? 220 : 90;
-            };
+            // Fixed-opacity boxes. Pressed-state flash removed — user
+            // feedback was that brightening on touch obscured the note
+            // columns underneath and read as visual noise during fast
+            // play. Dim steady boxes serve as spatial anchors only.
+            auto region_alpha = [&](bool) -> Uint8 { return 20; };
+            auto border_alpha = [&](bool) -> Uint8 { return 90; };
 
             if (cfg_touch_layout == 1 && keys == 4) {
                 // Quadrant mode — 2x2 grid over the whole screen.
@@ -2392,12 +2426,18 @@ int main(int argc, char* argv[]) {
             }
 
             double rp_note = raw_position_at(n.time);
-            float y = judgement_y - (float)((rp_note - rp_now) * judgement_y / time_range);
+            // Down: future notes above judgment (smaller y).
+            // Up:   future notes below judgment (larger y).
+            float y = (cfg_scroll_direction == 1)
+                ? judgement_y + (float)((rp_note - rp_now) * (win_h - judgement_y) / time_range)
+                : judgement_y - (float)((rp_note - rp_now) * judgement_y / time_range);
             // Tail uses the same SV-aware accumulator as the head.
             // Mixing formulas (old flat (end-now)*scroll_pps) made the tail
             // drift by the accumulated multiplier difference on SV/BPM maps.
             double rp_end = n.is_hold ? raw_position_at(n.end_time) : rp_note;
-            float y_end = judgement_y - (float)((rp_end - rp_now) * judgement_y / time_range);
+            float y_end = (cfg_scroll_direction == 1)
+                ? judgement_y + (float)((rp_end - rp_now) * (win_h - judgement_y) / time_range)
+                : judgement_y - (float)((rp_end - rp_now) * judgement_y / time_range);
 
             // Sticky head: while a hold is active, pin the head to the
             // judgement line and let the body shrink from the bottom.
@@ -2445,6 +2485,79 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderDrawColor(renderer, cr, cg, cb, ca);
                 SDL_FRect r = { x + 2.0f, head_y - h * 0.5f, w, h };
                 SDL_RenderFillRect(renderer, &r);
+            }
+        }
+
+        // ---- Playfield HUD: combo + last judgement ----
+        // Drawn on top of notes, below pause/result overlays. Fresh
+        // render each frame — 4 text draws, negligible at 120fps.
+        if (app_state == AppState::Playing && !paused) {
+            float mid_x = playfield_x + playfield_w * 0.5f;
+
+            // Combo counter. Sits between the play area and the judgement
+            // line, on the far side from incoming notes. Hidden at combo 0
+            // (matches lazer: nothing displayed when no active combo).
+            if (combo > 0) {
+                char cbuf[16];
+                SDL_snprintf(cbuf, sizeof(cbuf), "%d", combo);
+                int clen = (int)strlen(cbuf);
+                float cscale = 5.0f;
+                float cw = (float)clen * 8.0f * cscale;
+                float cx = (mid_x - cw * 0.5f) / cscale;
+                // Down mode: combo sits ABOVE judgement (future-notes side).
+                // Up mode:   combo sits BELOW judgement (future-notes side).
+                float cy_px = (cfg_scroll_direction == 1)
+                    ? (judgement_y + 50.0f)
+                    : (judgement_y - 50.0f - 8.0f * cscale);
+                SDL_SetRenderScale(renderer, cscale, cscale);
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 245);
+                SDL_RenderDebugText(renderer, cx, cy_px / cscale, cbuf);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
+
+            // Judgement text. Fades out over ~400ms after ~350ms of hold.
+            if (last_judgement_tier >= 0 && last_judgement_time > 0.0) {
+                double age_ms = (double)SDL_GetTicks() - last_judgement_time;
+                const double HOLD_MS = 350.0;
+                const double FADE_MS = 400.0;
+                double alpha = 1.0;
+                if (age_ms > HOLD_MS) {
+                    alpha = 1.0 - (age_ms - HOLD_MS) / FADE_MS;
+                    if (alpha < 0.0) alpha = 0.0;
+                }
+                if (age_ms >= 0.0 && alpha > 0.0) {
+                    const char* base = "";
+                    Uint8 r = 255, g = 255, b = 255;
+                    switch (last_judgement_tier) {
+                        case 0: base = "PERFECT"; r=100; g=200; b=255; break;
+                        case 1: base = "GREAT";   r=120; g=255; b=120; break;
+                        case 2: base = "GOOD";    r=200; g=255; b=120; break;
+                        case 3: base = "OK";      r=255; g=210; b=100; break;
+                        case 4: base = "MEH";     r=255; g=160; b=100; break;
+                        case 5: base = "MISS";    r=255; g=100; b=100; break;
+                    }
+                    // Early/late prefix on non-miss tiers.
+                    const char* prefix = "";
+                    if (last_judgement_tier != 5) {
+                        if      (last_judgement_delta > 0) prefix = "EARLY ";
+                        else if (last_judgement_delta < 0) prefix = "LATE ";
+                    }
+                    char jbuf[64];
+                    SDL_snprintf(jbuf, sizeof(jbuf), "%s%s", prefix, base);
+                    int jlen = (int)strlen(jbuf);
+                    float jscale = 3.0f;
+                    float jw = (float)jlen * 8.0f * jscale;
+                    float jx = (mid_x - jw * 0.5f) / jscale;
+                    // Judgement text sits right at the judgement line, on the
+                    // same side as combo but smaller.
+                    float jy_px = (cfg_scroll_direction == 1)
+                        ? (judgement_y - 30.0f - 8.0f * jscale)
+                        : (judgement_y + 30.0f);
+                    SDL_SetRenderScale(renderer, jscale, jscale);
+                    SDL_SetRenderDrawColor(renderer, r, g, b, (Uint8)(alpha * 255));
+                    SDL_RenderDebugText(renderer, jx, jy_px / jscale, jbuf);
+                    SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                }
             }
         }
 

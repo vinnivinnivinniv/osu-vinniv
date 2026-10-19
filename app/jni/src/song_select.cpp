@@ -253,11 +253,11 @@ std::vector<SongEntry> scan_songs(const std::string& root,
         // Cache file is written before the cold-path sort, so it holds
         // scan order. Sort here so warm loads match cold loads.
         std::sort(cached.begin(), cached.end(), [](const SongEntry& a, const SongEntry& b) {
+            if (a.title  != b.title)  return a.title  < b.title;
+            if (a.artist != b.artist) return a.artist < b.artist;
             double sa = std::round(a.stars * 100.0) / 100.0;
             double sb = std::round(b.stars * 100.0) / 100.0;
             if (sa != sb) return sa < sb;
-            if (a.title  != b.title)  return a.title  < b.title;
-            if (a.artist != b.artist) return a.artist < b.artist;
             return a.version < b.version;
         });
         return cached;
@@ -336,12 +336,16 @@ std::vector<SongEntry> scan_songs(const std::string& root,
     SDL_Log("CACHE: saved %zu entries", out.size());
 
     // Primary sort: title (lazer default), then artist, then difficulty.
+    // Title-first sort. Groups all difficulties of a song together
+    // (Agate 2.5, Agate 4.5, Beowulf 1.5, Beowulf 9.5) instead of
+    // interleaving songs by star tier. Within a title, difficulty
+    // ascends by star rating.
     std::sort(out.begin(), out.end(), [](const SongEntry& a, const SongEntry& b) {
+        if (a.title  != b.title)  return a.title  < b.title;
+        if (a.artist != b.artist) return a.artist < b.artist;
         double sa = std::round(a.stars * 100.0) / 100.0;
         double sb = std::round(b.stars * 100.0) / 100.0;
         if (sa != sb) return sa < sb;
-        if (a.title  != b.title)  return a.title  < b.title;
-        if (a.artist != b.artist) return a.artist < b.artist;
         return a.version < b.version;
     });
 
