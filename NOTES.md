@@ -406,6 +406,32 @@ Upgrade path:
     (our `songs/` layout already groups by folder, so this is mostly
     a rendering change).
 
+
+- **SliderPatternGenerator port** (converter phase 3d). 500+ lines from
+  lazer's `SliderPatternGenerator.cs`. Decomposes sliders into
+  head/repeat/tail notes, assigns columns per segment. The four test
+  maps `100374`, `1450162`, `4869637`, `zero-length-slider` are
+  slider-first, so porting sliders unlocks the big test-prefix jump.
+  Two to three round-trips, most complex piece left.
+
+- **SpinnerPatternGenerator port** (converter phase 3d). ~100 lines.
+  Simpler than sliders. Converts spinners to holds (if duration >=
+  100ms) or single notes, with special 8K column handling. Cheap win
+  once sliders land.
+
+- **KeyMod support for the converter.** `ManiaModKey1..10` force a
+  target column count. Threading `target_columns` through
+  `convert_to_mania` (~50 lines) unlocks the 3K-18K goldens, extending
+  test coverage from 3 maps to 23. Needed for full column-count parity
+  proof.
+
+- **Stair-type finalization bug.** `HitCirclePatternGenerator::generate()`
+  doesn't update `stair_type` after emitting notes. Lazer does a foreach
+  that flips stair <-> reverse-stair when emitted notes hit the boundary
+  columns. Affects dense maps (time_sep <= 95ms). Not hit by 20544 (too
+  sparse), but will diverge the moment slider port unlocks longer
+  prefixes. Small fix (3 lines), harness catches regression immediately.
+
 ## Medium priority
 - Result → song select (currently tap = retry; only Esc goes back)
 - On-screen restart button (R key works)
@@ -543,6 +569,37 @@ Key points:
 2. Score multiplier application at result time
 3. Converter pattern generators (hitcircle, slider, spinner)
 
+
+- **Star sort: title primary, stars secondary.** Current order is
+  stars-then-title, which interleaves difficulties from different songs
+  by rating tier. User's mental model is:
+      Agate 2.5, Agate 4.5, Beowulf 1.5, Beowulf 9.5
+  (alphabetical by title, then ascending stars within each title).
+  Affects both the cold-path and cache-hit comparators in
+  `song_select.cpp`.
+
+- **Touch control visual bounding boxes.** Lazer draws transparent white
+  rounded rectangles over each tappable region. Critical for `screen`
+  and `quadrants` layouts where there's no column strip as spatial
+  anchor — users coming from physical keyboard have zero tactile
+  reference. Draw per-strip rectangles in gameplay, dim when not
+  pressed. Could also apply to `columns` layout for consistency. ~1
+  hour of render + hit-test integration.
+
+- **Scroll direction (up) setting.** Notes rise from bottom to judgement
+  line instead of falling. On touch, fingers rest over the empty lower
+  half rather than obscuring incoming notes. Settings key:
+  `scroll_direction=down|up`. Requires flipping the y-formula sign in
+  the note draw loop AND head/tail cap anchor positions. ~30 lines
+  plus careful testing across all three touch layouts.
+
+- **Quadrant paired-strip lighting.** When a quadrant is pressed, both
+  corresponding column strips flash (UL -> cols 0 AND 3 both light).
+  Without the paired flash, quadrant mode reads as broken — one press
+  animates two judgement-line columns but only one note judges.
+  Deferred as cosmetic; becomes more important once bounding boxes
+  land since the boxes emphasize the two-per-tap mapping.
+
 ## Low priority
 - Mods: DT / HT / HR. DT/HT change scroll_pps and audio rate
   together; needs a "rate" concept in the audio stream too.
@@ -608,6 +665,26 @@ Key points:
   "don't restart from 0" variants; do this first and the mechanism
   extends.
 - **Bar lines.** Cosmetic beat markers.
+
+
+- **Video frame-time investigation.** User reports video maps feel wrong
+  despite stable HUD FPS (1s average). Possible causes, ranked:
+    1. Frame time variance — 120 avg with occasional 8ms+ spikes. HUD
+       shows average, not p99. Fix: log p99/max per second.
+    2. `SDL_LockTexture` + memcpy of 3.7 MB per frame on render
+       thread. Memory-bandwidth-limited on SD695. Fix: smaller copy
+       path (persistent-mapped or worker-side copy).
+    3. Worker pacing sleep interfering with scheduler. Fix: thread
+       pinning.
+    4. Native 24fps video placebo — not a bug, video source is 23.976fps.
+  Measure first (item 1) before touching code.
+
+- **Audio offset analyzer.** Suggest `cfg_audio_offset_ms` based on
+  recent play history. Track signed median hit error across last N
+  plays, propose adjustment, show "Based on last N plays, suggested
+  offset is X ms" with an apply button — mirrors lazer's `Suggest
+  offset` row. Requires per-play hit error accumulation and a new
+  settings row. ~1 hour.
 
 ## Lessons learned (read before your first patch)
 
