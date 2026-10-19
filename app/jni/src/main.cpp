@@ -1121,6 +1121,40 @@ int main(int argc, char* argv[]) {
             audio_queued = false;
             audio_start_tick = SDL_GetTicks() + 2000;
             audio_drift_ms = 0.0;
+
+            // Populate songs[0] with a synthetic entry so the video state
+            // block and load_song_bg have valid data to work from. The
+            // replay path bypasses song select (which normally populates
+            // this vector during scan), so without this the video block
+            // reads songs[0] on an empty vector and never requests playback.
+            std::string rfolder = rmap_folder;
+            if (!rfolder.empty() && rfolder.back() == '/')
+                rfolder.pop_back();
+            songs.clear();
+            {
+                SongEntry synth;
+                synth.folder      = rfolder;
+                synth.osu_path    = rbuf;
+                synth.title       = map.title;
+                synth.artist      = map.artist;
+                synth.version     = map.version;
+                synth.key_count   = map.key_count;
+                synth.od          = map.od;
+                synth.audio_path  = raudio;
+                synth.preview_time = map.preview_time;
+                synth.original_mode = map.mode;
+                if (!map.bg_file.empty())    synth.bg_path    = rmap_folder + map.bg_file;
+                if (!map.video_file.empty()) synth.video_path = rmap_folder + map.video_file;
+                songs.push_back(synth);
+            }
+            selected_index = 0;
+
+            // Load the map's bg image and sample bank, same as the normal
+            // song-select-play path would have.
+            load_song_bg(0);
+            map_bank.load_from_folder(rfolder);
+            song_video_key.clear();   // force the video block to request
+
             compute_geometry();
             app_state = AppState::Playing;
 
@@ -1280,13 +1314,20 @@ int main(int argc, char* argv[]) {
 
     while (running) {
         if (scan.try_consume(all_songs)) {
-            rebuild_songs();
-            selected_index = 0;
-            song_scroll = 0.0f;
-            preview_key.clear();
-            song_bg_key.clear();
-            SDL_Log("SCAN: consumed %zu entries (filtered to %zu visible)",
-                    all_songs.size(), songs.size());
+            if (autoplay_replay_active) {
+                // Replay mode populated songs[0] directly from the replayed
+                // map. Don't let the scan rebuild clobber it.
+                SDL_Log("SCAN: consumed %zu entries (replay active, list unchanged)",
+                        all_songs.size());
+            } else {
+                rebuild_songs();
+                selected_index = 0;
+                song_scroll = 0.0f;
+                preview_key.clear();
+                song_bg_key.clear();
+                SDL_Log("SCAN: consumed %zu entries (filtered to %zu visible)",
+                        all_songs.size(), songs.size());
+            }
             for (int _i = 0; _i < 5 && _i < (int)songs.size(); _i++)
                 SDL_Log("SONG[%d]: artist='%s' title='%s' ver='%s'",
                         _i, songs[_i].artist.c_str(),
@@ -2007,7 +2048,8 @@ int main(int argc, char* argv[]) {
                 want_loop = true;
                 want_active = true;
             } else if (app_state == AppState::Playing &&
-                       !paused && !resuming && !result_shown) {
+                       !paused && !resuming && !result_shown &&
+                       !songs.empty()) {
                 want_key = "play:" + songs[selected_index].video_path;
                 want_loop = false;
                 want_active = true;
