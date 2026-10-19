@@ -766,6 +766,11 @@ int main(int argc, char* argv[]) {
 
 
     Uint64 last_report = SDL_GetTicks();
+    // Frame-time samples for the 1s window. Used to compute p99/max
+    // so we can distinguish "avg is fine but tail stutters" from
+    // "actually smooth". 256 samples covers a 240fps window.
+    static double frame_dt_ms[256] = {};
+    int frame_dt_count = 0;
     int frames = 0;
     // ---- Song list + state machine ----
     AppState app_state = AppState::SongSelect;
@@ -919,6 +924,126 @@ int main(int argc, char* argv[]) {
     float menu_btn_h = 0.0f;
     float menu_btn_y[3] = { 0.0f, 0.0f, 0.0f };
 
+
+    // ---------------------------------------------------------------------
+    // Autoplay test mode. Triggered by presence of test_autoplay.txt:
+    //   /sdcard/Android/data/sh.ppy.osuvinniv/files/test_autoplay.txt
+    // containing a single line: /path/to/map.osu
+    //
+    // Runs a synthetic perfect play: each note's press is delivered at
+    // exactly note.time, miss sweep and hold completion advance to just
+    // past last_note_end. Prints TEST_RESULT: line and returns immediately.
+    //
+    // No rendering, no audio queue, no human input. Deterministic O(N)
+    // iterations, wall time ~ 100ms regardless of song length. Delete the
+    // trigger file after read so subsequent launches are normal mode.
+    // ---------------------------------------------------------------------
+    {
+        const char* trigger = "/sdcard/Android/data/sh.ppy.osuvinniv/files/test_autoplay.txt";
+        FILE* tf = fopen(trigger, "r");
+        if (tf) {
+            char tbuf[1024] = {0};
+            if (fgets(tbuf, sizeof(tbuf), tf)) {
+                size_t tl = strlen(tbuf);
+                while (tl > 0 && (tbuf[tl-1]=='\n' || tbuf[tl-1]=='\r')) tbuf[--tl] = 0;
+            }
+            fclose(tf);
+            remove(trigger);   // one-shot
+
+            SDL_Log("TEST: autoplay on %s", tbuf);
+            Beatmap tm;
+            if (!parse_osu_file(tbuf, tm, /*metadata_only=*/false)) {
+                SDL_Log("TEST_RESULT: FAIL parse '%s'", tbuf);
+                return 1;
+            }
+            map = tm;
+            rebuild_timing_positions();
+
+            last_note_end = 0.0;
+            hold_count = 0;
+            for (const auto& n : map.notes) {
+                if (n.end_time > last_note_end) last_note_end = n.end_time;
+                if (n.is_hold) hold_count++;
+            }
+            note_judged.assign(map.notes.size(), false);
+            note_hit_time.assign(map.notes.size(), -1.0);
+            hold_active.assign(map.notes.size(), false);
+            hold_started.assign(map.notes.size(), false);
+            hold_broken.assign(map.notes.size(), false);
+            note_ghost.assign(map.notes.size(), false);
+            release_time.assign(map.notes.size(), 0.0);
+            for (int j = 0; j < 16; j++) column_pressed[j] = false;
+            active_holds.clear();
+            active_fingers.clear();
+            combo = 0; max_combo = 0;
+            cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+            cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+            miss_cursor = 0;
+
+            audio_start_tick = 0;    // sim_time IS map time
+
+            size_t autoplay_idx = 0;
+            auto drain_to = [&](double t) {
+                while (miss_cursor < map.notes.size() &&
+                       map.notes[miss_cursor].time < t - od_miss_window) {
+                    size_t i = miss_cursor;
+                    if (!note_judged[i] && !hold_started[i]) {
+                        bool is_hold_miss = map.notes[i].is_hold;
+                        if (is_hold_miss) {
+                            hold_broken[i] = true;
+                            release_time[i] = t;
+                        }
+                        note_ghost[i] = true;
+                        note_judged[i] = true;
+                        cnt_miss++;
+                        combo = 0;
+                    }
+                    miss_cursor++;
+                }
+                for (size_t i = 0; i < active_holds.size(); ) {
+                    size_t hi = active_holds[i];
+                    if (t > map.notes[hi].end_time) {
+                        hold_active[hi] = false;
+                        note_judged[hi] = true;
+                        release_time[hi] = t;
+                        cnt_perfect++;
+                        combo++;
+                        if (combo > max_combo) max_combo = combo;
+                        active_holds.erase(active_holds.begin() + i);
+                    } else i++;
+                }
+            };
+
+            // Press each note at exactly note.time — Perfect tier every time.
+            while (autoplay_idx < map.notes.size()) {
+                double nt = map.notes[autoplay_idx].time;
+                int c = map.notes[autoplay_idx].column;
+                judge_col(c, nt);
+                drain_to(nt);
+                autoplay_idx++;
+            }
+
+            // Final drain past end of map.
+            drain_to(last_note_end + 5000.0);
+
+            int expected_perfect = (int)map.notes.size() + hold_count;
+            int total_judged = cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss;
+            double acc = total_judged > 0
+                ? (cnt_perfect*305.0 + cnt_300*300.0 + cnt_200*200.0
+                   + cnt_100*100.0 + cnt_50*50.0) / (total_judged * 305.0) * 100.0
+                : 0.0;
+
+            bool pass = (cnt_perfect == expected_perfect)
+                     && (cnt_miss == 0)
+                     && (total_judged == expected_perfect);
+            SDL_Log("TEST_RESULT: %s notes=%zu holds=%d expected_P=%d got_P=%d "
+                    "300=%d 200=%d 100=%d 50=%d miss=%d max_combo=%d acc=%.2f",
+                    pass ? "PASS" : "FAIL",
+                    map.notes.size(), hold_count, expected_perfect, cnt_perfect,
+                    cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss, max_combo, acc);
+            return pass ? 0 : 1;
+        }
+    }
 
     while (running) {
         if (scan.try_consume(all_songs)) {
@@ -1853,7 +1978,7 @@ int main(int argc, char* argv[]) {
             SDL_RenderFillRect(renderer, &strip);
         }
 
-        // Column separators
+        // Column press highlights (playfield-anchored) — kept as before
         for (int c = 0; c < keys; c++) {
             if (column_pressed[c]) {
                 SDL_SetRenderDrawColor(renderer, 40, 60, 110, 255);
@@ -1861,6 +1986,73 @@ int main(int argc, char* argv[]) {
                 SDL_RenderFillRect(renderer, &bg);
             }
         }
+
+        // Touch bounding boxes — semi-transparent white outlines over each
+        // tappable region. Style follows lazer: 2px border, dim fill,
+        // brighter on press. Layout-dependent.
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        {
+            // Sample brightness per region so boxes flash on input.
+            auto region_alpha = [&](bool pressed) -> Uint8 {
+                return pressed ? 90 : 20;
+            };
+            auto border_alpha = [&](bool pressed) -> Uint8 {
+                return pressed ? 220 : 90;
+            };
+
+            if (cfg_touch_layout == 1 && keys == 4) {
+                // Quadrant mode — 2x2 grid over the whole screen.
+                float w = (float)win_w * 0.5f;
+                float h = (float)win_h * 0.5f;
+                // Map (row, col) of the visual grid to the actual column
+                // each quadrant taps. Matches find_col_quadrant().
+                //   TL=0  TR=3
+                //   BL=1  BR=2
+                int quad_col[2][2] = {{0, 3}, {1, 2}};
+                for (int r = 0; r < 2; r++) {
+                    for (int c = 0; c < 2; c++) {
+                        int col = quad_col[r][c];
+                        bool pressed = column_pressed[col];
+                        float bx = c * w;
+                        float by = r * h;
+                        // Fill
+                        SDL_SetRenderDrawColor(renderer, 255, 255, 255, region_alpha(pressed));
+                        SDL_FRect fill = { bx + 4.0f, by + 4.0f, w - 8.0f, h - 8.0f };
+                        SDL_RenderFillRect(renderer, &fill);
+                        // Border
+                        SDL_SetRenderDrawColor(renderer, 255, 255, 255, border_alpha(pressed));
+                        SDL_FRect border = { bx + 4.0f, by + 4.0f, w - 8.0f, h - 8.0f };
+                        SDL_RenderRect(renderer, &border);
+                    }
+                }
+            } else if (cfg_touch_layout == 2) {
+                // Screen mode — N vertical strips over the whole window.
+                float strip_w = (float)win_w / (float)keys;
+                for (int c = 0; c < keys; c++) {
+                    bool pressed = (c < 16) && column_pressed[c];
+                    float bx = c * strip_w;
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, region_alpha(pressed));
+                    SDL_FRect fill = { bx + 4.0f, 4.0f, strip_w - 8.0f, (float)win_h - 8.0f };
+                    SDL_RenderFillRect(renderer, &fill);
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, border_alpha(pressed));
+                    SDL_FRect border = { bx + 4.0f, 4.0f, strip_w - 8.0f, (float)win_h - 8.0f };
+                    SDL_RenderRect(renderer, &border);
+                }
+            } else {
+                // Column mode — one box per playfield column, tall.
+                for (int c = 0; c < keys; c++) {
+                    bool pressed = (c < 16) && column_pressed[c];
+                    float bx = playfield_x + c * col_w;
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, region_alpha(pressed));
+                    SDL_FRect fill = { bx + 2.0f, 4.0f, col_w - 4.0f, (float)win_h - 8.0f };
+                    SDL_RenderFillRect(renderer, &fill);
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, border_alpha(pressed));
+                    SDL_FRect border = { bx + 2.0f, 4.0f, col_w - 4.0f, (float)win_h - 8.0f };
+                    SDL_RenderRect(renderer, &border);
+                }
+            }
+        }
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
         SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
         for (int c = 1; c < keys; c++) {
@@ -2005,6 +2197,15 @@ int main(int argc, char* argv[]) {
             SDL_FRect dst = { 60.0f, 60.0f,
                               (float)HUD_TEX_W, (float)HUD_TEX_H };
             SDL_RenderTexture(renderer, hud_tex, NULL, &dst);
+        }
+
+        // Record this frame's duration for p99/max logging.
+        {
+            Uint64 frame_end_us = SDL_GetTicksNS() / 1000ULL;
+            double dt_ms = (frame_end_us - frame_start) / 1000.0;
+            if (frame_dt_count < 256) {
+                frame_dt_ms[frame_dt_count++] = dt_ms;
+            }
         }
 
         // Frame cap: target cfg_fps, sleep the remainder of the frame.
@@ -2541,7 +2742,29 @@ int main(int argc, char* argv[]) {
         Uint64 now = SDL_GetTicks();
         if (now - last_report >= 1000) {
             report_count++;
-            SDL_Log("FPS[%d]: %d  combo=%d max=%d P=%d 300=%d 200=%d 100=%d 50=%d miss=%d", report_count, frames, combo, max_combo, cnt_perfect, cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss);
+            // Frame-time stats over the 1s window. p99 and max are the
+            // signals that matter for "feels smooth" — average can look fine
+            // while individual frames stall.
+            double dt_avg = 0.0, dt_p50 = 0.0, dt_max = 0.0, dt_p99 = 0.0;
+            if (frame_dt_count > 0) {
+                double sorted[256];
+                int n = frame_dt_count < 256 ? frame_dt_count : 256;
+                for (int i = 0; i < n; i++) { sorted[i] = frame_dt_ms[i]; dt_avg += sorted[i]; }
+                dt_avg /= n;
+                for (int i = 1; i < n; i++) {
+                    double v = sorted[i]; int j = i - 1;
+                    while (j >= 0 && sorted[j] > v) { sorted[j + 1] = sorted[j]; j--; }
+                    sorted[j + 1] = v;
+                }
+                dt_max = sorted[n - 1];
+                dt_p50 = sorted[n / 2];
+                int idx99 = (n * 99) / 100;
+                if (idx99 >= n) idx99 = n - 1;
+                dt_p99 = sorted[idx99];
+            }
+            frame_dt_count = 0;
+
+            SDL_Log("FPS[%d]: %d  dt_ms avg=%.2f p50=%.2f p99=%.2f max=%.2f  combo=%d max=%d P=%d 300=%d 200=%d 100=%d 50=%d miss=%d", report_count, frames, dt_avg, dt_p50, dt_p99, dt_max, combo, max_combo, cnt_perfect, cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss);
             hud_fps = frames;      // update HUD's FPS display once per second
             frames = 0;
             last_report = now;

@@ -20,11 +20,10 @@ void VideoPlayer::shutdown() {
     quit_.store(true);
     generation_.fetch_add(1);
     if (worker_.joinable()) worker_.join();
-    if (texture_) {
-        SDL_DestroyTexture(texture_);
-        texture_ = nullptr;
-        tex_w_ = tex_h_ = 0;
+    for (int i = 0; i < 2; i++) {
+        if (textures_[i]) { SDL_DestroyTexture(textures_[i]); textures_[i] = nullptr; }
     }
+    tex_w_ = tex_h_ = 0;
 }
 
 void VideoPlayer::request(const char* path, bool looping, double start_ms) {
@@ -64,46 +63,55 @@ void VideoPlayer::tick() {
     {
         std::lock_guard<std::mutex> lk(frame_mu_);
         if (!frame_pending_) return;
-        // Swap frame_data_ (worker just filled) into upload_data_ (safe
-        // for us to upload from). Both vectors keep their capacity so no
-        // per-frame 3.7 MB malloc/free churn. Worker is free to reuse
-        // the now-empty frame_data_ on its next post.
         std::swap(frame_data_, upload_data_);
         w = frame_w_;
         h = frame_h_;
         frame_pending_ = false;
     }
 
-    if (!texture_ || tex_w_ != w || tex_h_ != h) {
-        if (texture_) SDL_DestroyTexture(texture_);
-        texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32,
-                                     SDL_TEXTUREACCESS_STREAMING, w, h);
-        if (!texture_) {
+    // Ping-pong: render from the texture updated last frame while uploading
+    // to the other. Breaks the Adreno UnlockTexture GPU-sync stall caused by
+    // re-locking an in-use texture.
+    int upload_idx = 1 - tex_index_;
+    SDL_Texture* upload_tex = textures_[upload_idx];
+
+    if (!textures_[0] || !textures_[1] || tex_w_ != w || tex_h_ != h) {
+        for (int i = 0; i < 2; i++) {
+            if (textures_[i]) SDL_DestroyTexture(textures_[i]);
+            textures_[i] = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32,
+                                             SDL_TEXTUREACCESS_STREAMING, w, h);
+            if (textures_[i]) SDL_SetTextureBlendMode(textures_[i], SDL_BLENDMODE_BLEND);
+        }
+        if (!textures_[0] || !textures_[1]) {
             SDL_Log("VIDEO_PLAYER: texture create failed: %s", SDL_GetError());
             return;
         }
         tex_w_ = w;
         tex_h_ = h;
-        SDL_SetTextureBlendMode(texture_, SDL_BLENDMODE_BLEND);
+        upload_tex = textures_[upload_idx];
     }
 
-    // Use LockTexture for streaming updates — cheaper than UpdateTexture
-    // on several GLES drivers because it skips the internal staging copy.
     void* pixels = nullptr;
     int pitch = 0;
-    if (SDL_LockTexture(texture_, nullptr, &pixels, &pitch)) {
-        int row_bytes = w * 4;
+    if (!SDL_LockTexture(upload_tex, nullptr, &pixels, &pitch)) {
+        SDL_Log("VIDEO_PLAYER: SDL_LockTexture failed: %s", SDL_GetError());
+        return;
+    }
+
+    int row_bytes = w * 4;
+    const uint8_t* src_px = upload_data_.data();
+    if (pitch == row_bytes) {
+        memcpy(pixels, src_px, (size_t)row_bytes * h);
+    } else {
         uint8_t* dst = (uint8_t*)pixels;
-        const uint8_t* src_px = upload_data_.data();
         for (int y = 0; y < h; y++) {
             memcpy(dst + y * pitch, src_px + y * row_bytes, row_bytes);
         }
-        SDL_UnlockTexture(texture_);
-        ready_.store(true);
-        frames_delivered_.fetch_add(1);
-    } else {
-        SDL_Log("VIDEO_PLAYER: SDL_LockTexture failed: %s", SDL_GetError());
     }
+    SDL_UnlockTexture(upload_tex);
+    tex_index_ = upload_idx;
+    ready_.store(true);
+    frames_delivered_.fetch_add(1);
 }
 
 

@@ -31,7 +31,7 @@ struct VideoPlayer {
     void tick();
 
     // Latest texture, or nullptr if nothing ready.
-    SDL_Texture* current_texture() const { return texture_; }
+    SDL_Texture* current_texture() const { return textures_[tex_index_]; }
     int  texture_w() const { return tex_w_; }
     int  texture_h() const { return tex_h_; }
 
@@ -73,7 +73,8 @@ private:
     bool                 frame_pending_ = false;
 
     // Textures (main thread only)
-    SDL_Texture* texture_ = nullptr;
+    SDL_Texture* textures_[2] = { nullptr, nullptr };   // ping-pong
+    int          tex_index_  = 0;                      // which we rendered last
     int          tex_w_ = 0;
     int          tex_h_ = 0;
 };
