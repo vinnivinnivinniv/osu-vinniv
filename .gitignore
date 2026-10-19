@@ -25,3 +25,5 @@ tests/test_parser
 *.bak[0-9]
 third_party/ffmpeg-src/
 app/jni/ffmpeg/
+tests/test_converter
+tests/test_parser
