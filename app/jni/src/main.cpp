@@ -1435,6 +1435,56 @@ int main(int argc, char* argv[]) {
                 app_state = AppState::SongSelect;
                 SDL_Log("RESULT: back-to-select");
             }
+            // Touch equivalents of the RETRY / BACK buttons on result screen.
+            if (e.type == SDL_EVENT_FINGER_DOWN && result_shown) {
+                float rtx = e.tfinger.x * (float)win_w;
+                float rty = e.tfinger.y * (float)win_h;
+                float btn_w = 240.0f, btn_h = 90.0f;
+                float gap   = 40.0f;
+                float total_w = btn_w * 2 + gap;
+                float bx    = ((float)win_w - total_w) * 0.5f;
+                float by    = (float)win_h - 160.0f;
+
+                if (rtx >= bx && rtx <= bx + btn_w &&
+                    rty >= by && rty <= by + btn_h) {
+                    // RETRY — inline reset matching keyboard R path
+                    std::fill(note_judged.begin(),  note_judged.end(),  false);
+                    std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
+                    std::fill(hold_active.begin(),  hold_active.end(),  false);
+                    std::fill(hold_started.begin(), hold_started.end(), false);
+                    std::fill(hold_broken.begin(),  hold_broken.end(),  false);
+                    std::fill(note_ghost.begin(),   note_ghost.end(),   false);
+                    std::fill(release_time.begin(), release_time.end(), 0.0);
+                    for (int j = 0; j < 16; j++) column_pressed[j] = false;
+                    active_holds.clear();
+                    active_fingers.clear();
+                    combo = 0; max_combo = 0;
+                    cnt_perfect = 0; cnt_300 = 0; cnt_200 = 0;
+                    cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
+                    miss_cursor = 0;
+                    if (audio_stream) {
+                        SDL_ClearAudioStream(audio_stream);
+                        SDL_PauseAudioStreamDevice(audio_stream);
+                    }
+                    audio_queued = false;
+                    audio_start_tick = SDL_GetTicks() + 2000;
+                    audio_drift_ms = 0.0;
+                    result_shown = false;
+                    last_judgement_tier = -1;
+                    last_judgement_time = -1.0;
+                    song_video_key.clear();
+                    SDL_Log("RESULT: retry (touch)");
+                }
+                else if (rtx >= bx + btn_w + gap && rtx <= bx + btn_w + gap + btn_w &&
+                         rty >= by && rty <= by + btn_h) {
+                    result_shown = false;
+                    app_state = AppState::SongSelect;
+                    song_video_key.clear();
+                    preview_key.clear();
+                    SDL_Log("RESULT: back-to-select (touch)");
+                }
+                continue;
+            }
             if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                 (e.key.key == SDLK_R || e.key.key == SDLK_GRAVE) && result_shown) {
                 // Retry from result
@@ -2307,6 +2357,23 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Song progress bar (thin bar across top of playfield).
+        if (app_state == AppState::Playing && last_note_end > 0.0) {
+            double prog = now_ms / last_note_end;
+            if (prog < 0.0) prog = 0.0;
+            if (prog > 1.0) prog = 1.0;
+            float pb_x = playfield_x;
+            float pb_y = 4.0f;
+            float pb_w = playfield_w;
+            float pb_h = 6.0f;
+            SDL_SetRenderDrawColor(renderer, 20, 20, 30, 220);
+            SDL_FRect pb_bg = { pb_x, pb_y, pb_w, pb_h };
+            SDL_RenderFillRect(renderer, &pb_bg);
+            SDL_SetRenderDrawColor(renderer, 100, 180, 255, 240);
+            SDL_FRect pb_fill = { pb_x, pb_y, pb_w * (float)prog, pb_h };
+            SDL_RenderFillRect(renderer, &pb_fill);
+        }
+
         // COLUMN STRIP — dark strip under just the note columns so
         // notes stay readable over any bg.
         {
@@ -2585,8 +2652,18 @@ int main(int argc, char* argv[]) {
 
                 SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
 
+                // Score runs from current tier counts against the max
+                // possible judgements (taps + 2*holds). Updates live as
+                // notes are hit; same formula as the result screen.
+                int total_notes_for_score = (int)map.notes.size() + hold_count;
+                long live_score = compute_lazer_score(cnt_perfect, cnt_300, cnt_200,
+                                                       cnt_100, cnt_50, total_notes_for_score);
+
                 char buf[160];
                 int x = 6, y = 6, lh = 14;
+
+                SDL_snprintf(buf, sizeof(buf), "Score: %ld", live_score);
+                SDL_RenderDebugText(renderer, (float)x, (float)y, buf); y += lh;
 
                 SDL_snprintf(buf, sizeof(buf), "Combo: %d   Max: %d",
                              combo, max_combo);
@@ -2679,6 +2756,47 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
             SDL_FRect full = { 0, 0, (float)win_w, (float)win_h };
             SDL_RenderFillRect(renderer, &full);
+
+            // Touch buttons at bottom: [RETRY] [BACK].
+            // Hit-tested in FINGER_DOWN handler (below, in event loop).
+            {
+                float btn_w = 240.0f, btn_h = 90.0f;
+                float gap   = 40.0f;
+                float total_w = btn_w * 2 + gap;
+                float bx    = ((float)win_w - total_w) * 0.5f;
+                float by    = (float)win_h - 160.0f;
+
+                // Retry (green)
+                SDL_SetRenderDrawColor(renderer, 40, 90, 40, 240);
+                SDL_FRect retry_btn = { bx, by, btn_w, btn_h };
+                SDL_RenderFillRect(renderer, &retry_btn);
+                SDL_SetRenderDrawColor(renderer, 140, 220, 140, 255);
+                SDL_RenderRect(renderer, &retry_btn);
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                SDL_SetRenderDrawColor(renderer, 220, 255, 220, 255);
+                {
+                    float tx = (bx + (btn_w - 5 * 24.0f) * 0.5f) / 3.0f;
+                    float ty = (by + (btn_h - 24.0f) * 0.5f) / 3.0f;
+                    SDL_RenderDebugText(renderer, tx, ty, "RETRY");
+                }
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+                // Back (pink)
+                float bx2 = bx + btn_w + gap;
+                SDL_SetRenderDrawColor(renderer, 90, 40, 60, 240);
+                SDL_FRect back_btn = { bx2, by, btn_w, btn_h };
+                SDL_RenderFillRect(renderer, &back_btn);
+                SDL_SetRenderDrawColor(renderer, 220, 140, 180, 255);
+                SDL_RenderRect(renderer, &back_btn);
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                SDL_SetRenderDrawColor(renderer, 255, 220, 240, 255);
+                {
+                    float tx = (bx2 + (btn_w - 4 * 24.0f) * 0.5f) / 3.0f;
+                    float ty = (by + (btn_h - 24.0f) * 0.5f) / 3.0f;
+                    SDL_RenderDebugText(renderer, tx, ty, "BACK");
+                }
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
 
             // Score + accuracy
             long total_judged = (long)(cnt_perfect + cnt_300 + cnt_200 + cnt_100 + cnt_50 + cnt_miss);
