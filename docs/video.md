@@ -234,6 +234,31 @@ expected real APK delta is 2-4 MB. Measured in session 3 when CMake
 actually links.
 
 
+## Android refresh rate throttling (environmental)
+
+Android (Vivo/ColorOS in particular) drops from 120 Hz to 60 Hz after
+~5 seconds without user touch. This affects every gameplay session,
+video or not, but is more noticeable during sparse sections.
+
+Symptoms in logs: `FPS[N]: 60` sustained across the whole map, but
+`dt_ms avg` stays low (0.3-3 ms) — the frame budget is fine, the
+display is just presenting at 60 Hz.
+
+**Do not chase FPS=60 as a code bug.** Confirm by checking `dt_ms`
+values: if `p50 < 2 ms`, the frame work is fine and the 60 Hz is
+environmental.
+
+**Fix for testing:**
+```
+adb shell settings put system peak_refresh_rate 120
+adb shell settings put system min_refresh_rate 120
+```
+
+**Fix for production:** SDLActivity subclass must call
+`Surface.setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)`
+in `onWindowFocusChanged`. App-requested refresh rate overrides the
+default 'idle -> 60' policy.
+
 ## Session 3a verification
 
 FFmpeg is statically linked into `libmain.so`. Build succeeds. The
