@@ -434,6 +434,26 @@ Upgrade path:
 
 ## Medium priority
 
+- **Mods feature (KeyMod, DT, HT, HR).** Currently `convert_to_mania` accepts
+  a `forced_columns` parameter but nothing in the app passes a non-zero
+  value. No mod selection UI, no `mods=` settings key, no mod application
+  on the play-launch path, no score multiplier. Multi-hour session:
+    1. Settings: `mods=key4,dt,hr` string, parsed into a `Mods` bitmask
+    2. Song select sidebar: KeyMod radio group (1K-10K or None),
+       DT/HT/HR checkboxes (mutually exclusive rate mods)
+    3. Play-launch path: apply active mods before `convert_to_mania`
+       (KeyMod → forced_columns; HR → OD + 1.4; DT/HT → rate adjustment)
+    4. Audio rate: DT/HT multiply `cfg_scroll_speed` by 1.5/0.75 AND
+       audio playback frequency (SDL_AudioStream supports rate change)
+    5. Score multiplier: 0.90 KeyMod, 1.5 DT, 0.75 HT, 1.06 HR — applied
+       to `compute_lazer_score` result at result screen
+    6. Hit windows: DT/HT scale `od_window` results by speed_change;
+       HR adjusts OD by 1.4× before anchor lookup
+  Verifiable via KeyMod goldens only if Mode:0 source maps with
+  `ManiaModKey<N>`-derived goldens are generated (deferred).
+
+## Medium priority
+
 - **Song select: bg image as row background.** Currently each row is a
   flat dark blue rectangle. Lazer uses the map's `bg.jpg` / `bg.png`
   as the row background, dimmed (opacity ~50%) so text stays legible.
