@@ -281,6 +281,22 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
     std::sort(out.timing_points.begin(), out.timing_points.end(),
               [](const TimingPoint& a, const TimingPoint& b){ return a.time < b.time; });
 
+    // BPM range across uninherited TPs. Song select row shows
+    // "175 BPM" for single-BPM maps, "70-180 BPM" for maps with
+    // BPM changes. bpm_min==0 means no uninherited point found
+    // (malformed file — callers should treat as unknown).
+    {
+        double bmin = 0.0, bmax = 0.0;
+        for (const auto& tp : out.timing_points) {
+            if (!tp.uninherited || tp.beat_length <= 0.0) continue;
+            double b = 60000.0 / tp.beat_length;
+            if (bmin == 0.0 || b < bmin) bmin = b;
+            if (bmax == 0.0 || b > bmax) bmax = b;
+        }
+        out.bpm_min = bmin;
+        out.bpm_max = bmax;
+    }
+
     // Lazer Beatmap.GetMostCommonBeatLength(). Used as BaseBeatLength when
     // RelativeScaleBeatLengths is true (which mania sets). SliderMultiplier
     // cancels out between DrawableScrollingRuleset and DrawableManiaRuleset.

@@ -609,6 +609,19 @@ int main(int argc, char* argv[]) {
         return bank;
     };
 
+    // Live BPM at a given time — last uninherited TP at or before t.
+    // Inherited TPs don't affect BPM (they only scale SV).
+    auto bpm_at_time = [&](double t) -> double {
+        const auto& tps = map.timing_points;
+        double bpm = 0.0;
+        for (const auto& tp : tps) {
+            if (tp.time > t) break;
+            if (tp.uninherited && tp.beat_length > 0.0)
+                bpm = 60000.0 / tp.beat_length;
+        }
+        return bpm;
+    };
+
     // Press sound. Mirrors lazer's GameplaySampleTriggerSource.Play():
     // find the earliest unjudged note in the column, or the last judged
     // one if the column is fully resolved, or nothing if the column is
@@ -678,6 +691,11 @@ int main(int argc, char* argv[]) {
 
     auto judge_col = [&](int col, double t) -> bool {
         double map_t = t - (double)audio_start_tick;
+        // Match now_ms's clock. Without this, positive audio_offset
+        // shifts visuals later than wall clock but judgement still
+        // uses wall clock — resulting in positive offset feeling
+        // "reversed" (you must press late for Perfect).
+        map_t += audio_drift_ms + cfg_audio_offset_ms;
         double od = map.od;
         double p_win  = std::floor(od_window(od, 22.4, 19.4, 13.9)) + 0.5;
         double g_win  = std::floor(od_window(od, 64, 49, 34)) + 0.5;
@@ -2555,11 +2573,31 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // ---- Playfield HUD: combo + last judgement ----
+        // ---- Playfield HUD: combo + last judgement + BPM ----
         // Drawn on top of notes, below pause/result overlays. Fresh
-        // render each frame — 4 text draws, negligible at 120fps.
+        // render each frame — few text draws, negligible at 120fps.
         if (app_state == AppState::Playing && !paused) {
             float mid_x = playfield_x + playfield_w * 0.5f;
+
+            // Live BPM. Top-right corner of playfield. Shows current
+            // uninherited BPM only; a "180 BPM" on a 120-180 map reads
+            // as "currently 180" without needing to also display the
+            // range in-game (range is in song select).
+            {
+                double cur_bpm = bpm_at_time(now_ms);
+                if (cur_bpm > 0.0) {
+                    char bbuf[24];
+                    SDL_snprintf(bbuf, sizeof(bbuf), "%.0f BPM", cur_bpm);
+                    SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                    SDL_SetRenderDrawColor(renderer, 200, 220, 255, 180);
+                    int blen = (int)strlen(bbuf);
+                    float bw_px = (float)blen * 8.0f * 2.0f;
+                    float bxx = (playfield_x + playfield_w - bw_px - 8.0f) / 2.0f;
+                    float byy = ((float)win_h - 24.0f) / 2.0f;
+                    SDL_RenderDebugText(renderer, bxx, byy, bbuf);
+                    SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                }
+            }
 
             // Combo counter. Sits between the play area and the judgement
             // line, on the far side from incoming notes. Hidden at combo 0
@@ -3175,16 +3213,32 @@ int main(int argc, char* argv[]) {
 
                     char line1[256];
                     char line2[256];
+
+                    // Precompute BPM display string. Single-BPM maps show
+                    // "175 BPM"; maps with BPM changes show "70-180 BPM".
+                    char bpm_str[32] = "";
+                    if (songs[i].bpm_min > 0.0) {
+                        if (std::abs(songs[i].bpm_max - songs[i].bpm_min) < 0.5) {
+                            SDL_snprintf(bpm_str, sizeof(bpm_str),
+                                         "%.0f BPM", songs[i].bpm_max);
+                        } else {
+                            SDL_snprintf(bpm_str, sizeof(bpm_str),
+                                         "%.0f-%.0f BPM",
+                                         songs[i].bpm_min, songs[i].bpm_max);
+                        }
+                    }
                     // [NK] badge prefix on line1 (lazer parity), title after.
                     // Converts get a [Conv] tag ahead of the badge so they
                     // stand out in the list when Show converts is on.
                     const char* conv_tag = (songs[i].original_mode != 3) ? "[Conv] " : "";
                     SDL_snprintf(line1, sizeof(line1), "%s[%dK] %s",
                                  conv_tag, songs[i].key_count, songs[i].title.c_str());
-                    SDL_snprintf(line2, sizeof(line2), "*%.2f  %s   [%s]  OD%.1f",
+                    SDL_snprintf(line2, sizeof(line2),
+                                 "*%.2f  %s   [%s]  %s  OD%.1f",
                                  songs[i].stars,
                                  songs[i].artist.c_str(),
                                  songs[i].version.c_str(),
+                                 bpm_str,
                                  songs[i].od);
 
                     SDL_SetRenderScale(renderer, 3.0f, 3.0f);

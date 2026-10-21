@@ -433,6 +433,25 @@ Upgrade path:
   prefixes. Small fix (3 lines), harness catches regression immediately.
 
 ## Medium priority
+
+- **Song select: bg image as row background.** Currently each row is a
+  flat dark blue rectangle. Lazer uses the map's `bg.jpg` / `bg.png`
+  as the row background, dimmed (opacity ~50%) so text stays legible.
+  Task: load bg for each visible row (throttled — only rows in viewport,
+  cache by folder to avoid re-decode per scroll frame), draw as texture
+  fill behind text. Requires: `load_song_bg` currently works only for
+  `songs[selected_index]`, needs to become per-row with a small LRU
+  cache or a "bg keyed on folder" map.
+
+- **Song select: long-press → details panel.** Right-click equivalent
+  on touch. Lazer's pattern: press starts a circular progress
+  indicator at the touch point; release before completion = normal tap
+  (selects/plays); hold past completion (~400ms) = context action.
+  Task: state machine on the FINGER_DOWN/MOTION/UP sequence with a
+  circular arc rendered at the touch point. On completion, open a
+  details panel (mapper, source, tags, per-difficulty stats, bg preview
+  at larger size). Do not conflict with the existing drag-to-scroll
+  gesture — only trigger long-press when movement < N pixels.
 - Result → song select (currently tap = retry; only Esc goes back)
 - On-screen restart button (R key works)
 - Star rating display in song select (needs diffcalc — probably

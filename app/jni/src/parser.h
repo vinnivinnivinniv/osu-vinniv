@@ -38,7 +38,9 @@ struct Beatmap {
     int circle_count = 0;
     int slider_count = 0;
     int spinner_count = 0;
-    double bpm = 0.0;
+    double bpm = 0.0;       // first uninherited TP (legacy field)
+    double bpm_min = 0.0;   // across uninherited TPs; 0 = unknown
+    double bpm_max = 0.0;
     std::string title;
     std::string artist;
     std::string version;

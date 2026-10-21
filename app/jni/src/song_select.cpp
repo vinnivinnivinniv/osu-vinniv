@@ -55,6 +55,8 @@ static bool read_meta(const std::string& osu_path, SongEntry& e) {
     e.od        = m.od;
     e.preview_time = m.preview_time;
     e.original_mode = m.mode;
+    e.bpm_min = m.bpm_min;
+    e.bpm_max = m.bpm_max;
     if (m.mode != 3) {
         // Compute the column count the converter will actually use.
         // Same heuristic runs at play time; this keeps display and
