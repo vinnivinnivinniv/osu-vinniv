@@ -245,6 +245,17 @@ bool parse_osu_file(const std::string& path, Beatmap& out, bool metadata_only) {
                 }
             } catch (...) { continue; }
 
+            // Spinner objects declare their duration in field 5 as a
+            // bare number (no colon-composite, unlike mania holds).
+            // Without this, spinners arrive with end_time == time and
+            // the converter treats every spinner as a zero-duration tap.
+            // type is scoped to the try block; source_type on the note is
+            // the same value masked to bits 0-3.
+            if (!n.is_hold && (n.source_type & 8) != 0 && parts.size() >= 6) {
+                try { n.end_time = std::stod(parts[5]); }
+                catch (...) { n.end_time = n.time; }
+            }
+
             if (n.is_hold && parts.size() >= 6) {
                 // Field 5 is "endTime:hitSample" — endTime is the first
                 // colon-delimited value.

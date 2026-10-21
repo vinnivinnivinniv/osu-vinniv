@@ -105,7 +105,21 @@ void convert_to_mania(Beatmap& map, ConvertEmitFn emit) {
 
             last_stair  = gen.stair_type;
             prev_pattern = p;
+        } else if ((n.source_type & 8) != 0) {
+            // Spinner — faithful port of SpinnerPatternGenerator.
+            // Emits 1 tap or 1 hold depending on duration; random column
+            // avoiding previous pattern when ForceNotStack is set.
+            legacy_mania::SpinnerPatternGenerator sgen(
+                rng, n, map, prev_pattern, cols);
+            legacy_mania::Pattern sp = sgen.generate();
+            for (const auto& out : sp.hit_objects) {
+                out_notes.push_back(out);
+                this_emit.push_back(out);
+            }
+            // Spinner does NOT update prev_pattern (matches C#).
         } else {
+            // Slider — still pass-through as single note.
+            // Real SliderPatternGenerator lands in a future session.
             Note out = n;
             int c = (int)((double)n.column / (512.0 / (double)cols));
             if (c < 0) c = 0;

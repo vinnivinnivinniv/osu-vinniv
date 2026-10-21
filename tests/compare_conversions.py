@@ -32,8 +32,14 @@ def parse_records(path):
 
 
 def circle_prefix_len(records):
+    """Number of leading source objects we can verify.
+
+    Currently allows: circle (1), unknown/default (0), spinner (8).
+    Sliders (2) still gate-stop — SliderPatternGenerator isn't ported
+    yet, so any slider object will diverge by design.
+    """
     for i, r in enumerate(records):
-        if r["source_type"] not in (1, 0):
+        if r["source_type"] not in (1, 0, 8):
             return i
     return len(records)
 

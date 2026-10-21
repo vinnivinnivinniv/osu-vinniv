@@ -108,6 +108,36 @@ private:
     bool kiai_at(double time_ms) const;
 };
 
+// Port of SpinnerPatternGenerator. A spinner converts to either a
+// single tap or a hold note (hold if duration >= 100ms), at a random
+// column chosen to avoid stacking against the previous pattern.
+struct SpinnerPatternGenerator {
+    LegacyRandom&   rng;
+    const Beatmap&  beatmap;
+    const Note&     hit_object;
+    Pattern         previous_pattern;
+    int             total_columns;
+    int             random_start;
+
+    int             end_time = 0;      // spinner end time (int, matches C#)
+    uint32_t        convert_type = PT_None;
+
+    SpinnerPatternGenerator(LegacyRandom& rng,
+                            const Note& note,
+                            const Beatmap& beatmap,
+                            const Pattern& previous_pattern,
+                            int total_columns);
+
+    Pattern generate();
+
+private:
+    int  get_random_column(int lower = -1);
+    int  find_available_column(int initial, int lower,
+                               const std::vector<const Pattern*>* patterns);
+    void add_to_pattern(Pattern& p, int column, bool hold_note);
+    bool has_finish_sample() const;
+};
+
 // Conversion difficulty factor (from LegacyPatternGenerator.ConversionDifficulty).
 double compute_conversion_difficulty(const Beatmap& map);
 

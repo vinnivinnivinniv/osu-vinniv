@@ -439,4 +439,114 @@ int HitCirclePatternGenerator::get_random_note_count_mirrored(
     return count;
 }
 
+// =========================================================================
+// SpinnerPatternGenerator
+// =========================================================================
+
+SpinnerPatternGenerator::SpinnerPatternGenerator(
+    LegacyRandom& rng_,
+    const Note& note,
+    const Beatmap& beatmap_,
+    const Pattern& previous_pattern_,
+    int total_columns_)
+    : rng(rng_),
+      beatmap(beatmap_),
+      hit_object(note),
+      previous_pattern(previous_pattern_),
+      total_columns(total_columns_),
+      random_start(total_columns_ == 8 ? 1 : 0)
+{
+    // C# stores endTime as int — matches via truncation.
+    end_time = (int)note.end_time;
+
+    // ForceNotStack unless every column is already occupied by the
+    // previous pattern, in which case pick freely.
+    convert_type = (previous_pattern.column_with_objects() == total_columns)
+        ? PT_None
+        : PT_ForceNotStack;
+}
+
+int SpinnerPatternGenerator::get_random_column(int lower) {
+    if (lower < 0) lower = random_start;
+    return rng.next(lower, total_columns);
+}
+
+int SpinnerPatternGenerator::find_available_column(
+    int initial, int lower, const std::vector<const Pattern*>* patterns)
+{
+    if (lower < 0) lower = random_start;
+
+    auto is_valid = [&](int col) -> bool {
+        if (col < lower || col >= total_columns) return false;
+        if (patterns) {
+            for (const auto* p : *patterns) {
+                if (p && p->column_has_object(col)) return false;
+            }
+        }
+        return true;
+    };
+
+    if (is_valid(initial)) return initial;
+
+    // Sanity: at least one column must be valid, otherwise infinite loop.
+    bool any_valid = false;
+    for (int c = lower; c < total_columns; c++) {
+        if (is_valid(c)) { any_valid = true; break; }
+    }
+    if (!any_valid) return initial;   // defensive fallback
+
+    int col = initial;
+    do { col = get_random_column(lower); } while (!is_valid(col));
+    return col;
+}
+
+bool SpinnerPatternGenerator::has_finish_sample() const {
+    // Matches C# HitSampleInfo.HIT_FINISH check — bits 4 (finish) set.
+    return (hit_object.hit_sound & 4) != 0;
+}
+
+void SpinnerPatternGenerator::add_to_pattern(Pattern& p, int column, bool hold_note) {
+    Note n = {};
+    n.time        = hit_object.time;
+    n.end_time    = hold_note ? hit_object.end_time : hit_object.time;
+    n.column      = column;
+    n.hit_sound   = hit_object.hit_sound;
+    n.sample_bank = hit_object.sample_bank;
+    n.sample_bank_addition = hit_object.sample_bank_addition;
+    n.sample_suffix   = hit_object.sample_suffix;
+    n.sample_volume   = hit_object.sample_volume;
+    n.sample_filename = hit_object.sample_filename;
+    n.source_type = hold_note ? 1 : 1;   // output type = circle (hold marker via end_time)
+    n.is_hold     = hold_note;
+    p.add(n);
+}
+
+Pattern SpinnerPatternGenerator::generate() {
+    Pattern pattern;
+
+    int start_time = (int)hit_object.time;
+    bool generate_hold = (end_time - start_time) >= 100;
+
+    // Special 8K-column case: finish-sampled short spinners anchor to
+    // the special column (0). Otherwise random column.
+    if (total_columns == 8 && has_finish_sample() &&
+        (end_time - start_time) < 1000) {
+        add_to_pattern(pattern, 0, generate_hold);
+    } else if (total_columns == 8) {
+        int col = get_random_column(-1);
+        std::vector<const Pattern*> pats = { &previous_pattern };
+        col = find_available_column(col, -1,
+            (convert_type & PT_ForceNotStack) ? &pats : nullptr);
+        add_to_pattern(pattern, col, generate_hold);
+    } else {
+        int col = get_random_column(0);
+        std::vector<const Pattern*> pats = { &previous_pattern };
+        col = find_available_column(col, 0,
+            (convert_type & PT_ForceNotStack) ? &pats : nullptr);
+        add_to_pattern(pattern, col, generate_hold);
+    }
+
+    return pattern;
+}
+
 }  // namespace legacy_mania

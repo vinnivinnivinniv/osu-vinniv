@@ -21,10 +21,17 @@ echo "Running converter comparison against lazer goldens..."
 # Only Mode 0 maps with a Mappings-schema golden are testable here.
 # Other goldens exist but are gated on KeyMod or use a sample-conversion
 # schema (different JSON shape) which we don't consume yet.
+#
+# Spinner verification: 20544 (2 spinners) and 100374 (5 leading spinners)
+# now extend their compared prefixes, proving SpinnerPatternGenerator
+# matches lazer's output. The *-samples-* goldens (e.g.
+# spinner-convert-samples) use a different schema for sample-fidelity
+# testing and are not usable with the Mappings consumer.
 CORE_MAPS="
 20544
 100374
 1450162
+spinner-convert-samples
 "
 
 DATA_DIR=data/mania_conversion
