@@ -200,6 +200,10 @@ int main(int argc, char* argv[]) {
     float cfg_scroll_speed = 1.5f;
     int   cfg_touch_layout = 0;  // 0=columns, 1=quadrants (4K only)
     int   cfg_scroll_direction = 0;  // 0=down (notes fall), 1=up (notes rise)
+    // Force KeyMod column count on converted std maps. 0 = auto
+    // (difficulty heuristic), 1-10 = force that N-column playfield.
+    // Applies 0.90x score multiplier when active (matches lazer).
+    float cfg_mods_key = 0.0f;
     bool  cfg_show_converts = false;  // Show std/taiko/catch maps as converts
     int   cfg_fps_cap      = 120;   // 0 = uncapped
     float cfg_audio_offset_ms = 0.0f;
@@ -216,6 +220,10 @@ int main(int argc, char* argv[]) {
         int         cycle_values[4];
         int         cycle_count;
         int         key_count;
+        // Step for slider rounding. 0 = continuous. >0 rounds to
+        // nearest multiple of step from min_val. Used by KeyMod
+        // (0-10 in 1-step increments) to avoid float noise.
+        float       step = 0.0f;
     };
     SettingRow setting_rows[] = {
         { "Music Volume",    0, &cfg_music_vol,        0.0f,   1.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
@@ -225,6 +233,7 @@ int main(int argc, char* argv[]) {
             {"60","120","240","Uncapped"}, {60,120,240,0}, 4, 0 },
         { "Audio Offset",    0, &cfg_audio_offset_ms, -200.f, 200.f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0 },
         { "Scroll direction",1, &cfg_scroll_direction,  0.0f,   0.0f, {"down","up",nullptr,nullptr}, {0,1,0,0}, 2, 0 },
+        { "KeyMod (converts)",0, &cfg_mods_key,        0.0f,  10.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0, 0, 1.0f },
         { "Touch layout",    1, &cfg_touch_layout,     0.0f,   0.0f, {"columns","quadrants","screen",nullptr}, {0,1,2,0}, 3, 0 },
         { "4K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  4 },
         { "5K Keys",         2, nullptr,               0.0f,   0.0f, {nullptr,nullptr,nullptr,nullptr}, {0,0,0,0}, 0,  5 },
@@ -242,6 +251,15 @@ int main(int argc, char* argv[]) {
     const float settings_row_h   = 60.0f;
     const float settings_row_gap = 8.0f;
 
+    // Combined score multiplier from active mods. KeyMod = 0.90x when
+    // forced columns != auto. Applied to both HUD live score and
+    // result-screen score, matching lazer ManiaScoreMultiplierCalculator.
+    auto current_score_multiplier = [&]() -> float {
+        float m = 1.0f;
+        if (cfg_mods_key > 0.5f) m *= 0.9f;   // KeyMod active
+        return m;
+    };
+
     auto save_settings = [&]() {
         FILE* f = fopen("/sdcard/Android/data/sh.ppy.osuvinniv/files/settings.ini", "w");
         if (!f) return;
@@ -250,6 +268,7 @@ int main(int argc, char* argv[]) {
         fprintf(f, "scroll_speed=%.3f\n",    cfg_scroll_speed);
         fprintf(f, "touch_layout=%d\n",       cfg_touch_layout);
         fprintf(f, "scroll_direction=%d\n",   cfg_scroll_direction);
+        fprintf(f, "mods_key=%.0f\n",         cfg_mods_key);
         fprintf(f, "show_converts=%d\n",      cfg_show_converts ? 1 : 0);
         fprintf(f, "fps_cap=%d\n",           cfg_fps_cap);
         fprintf(f, "audio_offset_ms=%.3f\n", cfg_audio_offset_ms);
@@ -300,6 +319,7 @@ int main(int argc, char* argv[]) {
                 else if (k == "scroll_speed")    cfg_scroll_speed = std::stof(v);
                 else if (k == "touch_layout")    cfg_touch_layout = std::stoi(v);
                 else if (k == "scroll_direction") cfg_scroll_direction = std::stoi(v);
+                else if (k == "mods_key")        cfg_mods_key = std::stof(v);
                 else if (k == "show_converts")   cfg_show_converts = (std::stoi(v) != 0);
                 else if (k == "fps_cap")         cfg_fps_cap      = std::stoi(v);
                 else if (k == "audio_offset_ms") cfg_audio_offset_ms = std::stof(v);
@@ -1858,7 +1878,15 @@ int main(int argc, char* argv[]) {
                                 // (see docs/mechanics.md).
                                 if (new_map.mode != 3) {
                                     int old_mode = new_map.mode;
-                                    convert_to_mania(new_map);
+                                    // Apply KeyMod if set (0 = auto).
+                                    // forced_columns bypasses the difficulty
+                                    // heuristic and matches ManiaModKey<N>.
+                                    int forced = (int)std::round(cfg_mods_key);
+                                    if (forced < 0) forced = 0;
+                                    if (forced > 10) forced = 10;
+                                    convert_to_mania(new_map, nullptr, forced);
+                                    if (forced > 0)
+                                        SDL_Log("KEYMOD: forced %dK (0.90x)", forced);
                                     SDL_Log("CONVERT: mode=%d -> %dK, %zu notes",
                                             old_mode, new_map.key_count,
                                             new_map.notes.size());
@@ -1966,7 +1994,13 @@ int main(int argc, char* argv[]) {
                     auto& row = setting_rows[settings_row];
                     if (row.type == 0) {
                         float* t = (float*)row.target;
-                        *t = row.min_val + norm * (row.max_val - row.min_val);
+                        float v = row.min_val + norm * (row.max_val - row.min_val);
+                        if (row.step > 0.0f) {
+                            v = row.min_val + std::round((v - row.min_val) / row.step) * row.step;
+                            if (v < row.min_val) v = row.min_val;
+                            if (v > row.max_val) v = row.max_val;
+                        }
+                        *t = v;
                     } else if (row.type == 1) {
                         int idx = (int)(norm * row.cycle_count);
                         if (idx >= row.cycle_count) idx = row.cycle_count - 1;
@@ -2806,6 +2840,7 @@ int main(int argc, char* argv[]) {
                 int total_notes_for_score = (int)map.notes.size() + hold_count;
                 long live_score = compute_lazer_score(cnt_perfect, cnt_300, cnt_200,
                                                        cnt_100, cnt_50, total_notes_for_score);
+                live_score = (long)(live_score * current_score_multiplier());
 
                 char buf[160];
                 int x = 6, y = 6, lh = 14;
@@ -2998,6 +3033,7 @@ int main(int argc, char* argv[]) {
             }
             long score = compute_lazer_score(cnt_perfect, cnt_300, cnt_200,
                                               cnt_100, cnt_50, (int)total_notes);
+            score = (long)(score * current_score_multiplier());
 
             // Lazer ManiaScoreProcessor.RankFromScore: SS (X) iff base rank
             // is S (>= 95% acc) AND no Good/Ok/Meh/Miss judgements exist.
@@ -3083,6 +3119,11 @@ int main(int argc, char* argv[]) {
                     fill = (v - row.min_val) / (row.max_val - row.min_val);
                     if (row.target == (void*)&cfg_audio_offset_ms)
                         SDL_snprintf(buf, sizeof(buf), "%+.0f ms", v);
+                    else if (row.target == (void*)&cfg_mods_key) {
+                        int kv = (int)std::round(v);
+                        if (kv <= 0) SDL_snprintf(buf, sizeof(buf), "auto");
+                        else         SDL_snprintf(buf, sizeof(buf), "%dK forced", kv);
+                    }
                     else
                         SDL_snprintf(buf, sizeof(buf), "%.2f", v);
                 } else if (row.type == 1) {
