@@ -164,7 +164,7 @@ git push origin main
 ## Known landmines (as of this session)
 
 1. **Replay mode hangs** — rendered autoplay injection never fires.
-2. **Settings screen paginated** (done, verify on device). 15 rows split across two pages: page 0 = Audio/Game (Music, Hitsound, Scroll, FPS, Offset, Scroll dir, KeyMod — 7 rows), page 1 = Mods/Keys (Touch layout + 4K-10K keys — 8 rows). Page toggle button bottom-right of settings. Both pages fit within 1080p usable height. Tested at 2400x1080. If a future row addition pushes either page past 8 rows, add a third page rather than shrinking row_h.
+2. **Settings screen paginated** (done, verified by user). 15 rows split across two pages: page 0 = Audio/Game (Music, Hitsound, Scroll, FPS, Offset, Scroll dir, KeyMod — 7 rows), page 1 = Mods/Keys (Touch layout + 4K-10K keys — 8 rows). Page toggle button bottom-right of settings. Both pages fit within 1080p usable height. Tested at 2400x1080. If a future row addition pushes either page past 8 rows, add a third page rather than shrinking row_h.
 3. **Torus font not ported** — `SDL_RenderDebugText` is a blocky 8x8 font. Lazer's UI is Torus. Full port needs SDL3_ttf + vendored TTF + text cache.
 4. **SliderPatternGenerator missing** — 532 lines of lazer C# to port. Largest remaining converter piece. 3 sessions.
 5. **`map_offsets` not persisted** — per-map offsets reset on app restart.
