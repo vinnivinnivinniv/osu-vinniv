@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
                         e.emitted[i].end_time);
         }
         std::printf("\n");
-    });
+    }, forced_columns);
 
     return 0;
 }
