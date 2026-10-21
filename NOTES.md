@@ -811,3 +811,33 @@ native mania map of the same content. What reduces score is applying a
 Lazer does not convert non-standard maps to Mania, but we do as a feature.
 Because of this, Taiko maps that have videos will render the video squished to the bottom-left (Taiko's native layout) when converted to Mania. 
 This is expected behavior based on the source mode. Laugh at it and move on.
+
+## Per-map Offset Persistence (deferred to local leaderboards)
+
+**Current state:** `map_offsets` in `main.cpp` is an in-memory `std::map<std::string, float>` keyed by `.osu` path. Survives pause-retry and reselect within a session; **lost on app restart.** This is the last remaining gap in the per-map offset pipeline (SAVE / USE / Retry-read all work otherwise).
+
+**Lazer reference — where per-map offset actually lives:**
+
+- `osu.Game/Beatmaps/BeatmapUserSettings.cs` — `EmbeddedObject` with an `Offset` double field
+- `osu.Game/Beatmaps/BeatmapInfo.cs:46` — every `BeatmapInfo` carries a `BeatmapUserSettings UserSettings` reference
+- `osu.Game/Database/RealmAccess.cs:67` — schema v14 (2022-03-01) added `BeatmapUserSettings` to `BeatmapInfo`. It's a **Realm DB migration**, not a config file.
+- `osu.Game/Beatmaps/FramedBeatmapClock.cs:108` — the beatmap clock combines `OsuSetting.AudioOffset` (global) with `UserSettings.Offset` (per-map). Global is a bindable, per-map is stored in Realm.
+- `osu.Game/Beatmaps/BeatmapManager.cs:405` — when scores for a beatmap are reset, `beatmap.UserSettings.Offset = 0` is also cleared. **Per-map offset is tied to the beatmap's score state, not a standalone key-value store.**
+
+**Implication for us:** Lazer's per-map offset cannot outlive its local scores — they reset together. If we add our own `.ini` or cache-slot for offsets *before* implementing local leaderboards, we'd be creating a persistence model that diverges from lazer and would need to be reconciled later. Better to defer.
+
+**Do this when local leaderboards land:**
+
+1. Decide where per-score state lives (new `scores.ini`, extended `songs.index`, or a new sqlite — sqlite matches Realm's role best but adds a dependency)
+2. Add `offset_ms` as a per-beatmap field on that store
+3. Wire `BeatmapManager.cs:405` semantics: resetting scores for a map also zeroes its offset
+4. Migrate the current in-memory `map_offsets` map into the new store on first launch (default all to global)
+5. Remove `map_offsets` std::map, replace lookups with the store
+
+**Do NOT do before local leaderboards:** add a standalone `offsets.ini`. It looks like a 20-line change but locks in the wrong persistence model.
+
+**Files to look at when starting:**
+- `osu.Game/Beatmaps/BeatmapUserSettings.cs`
+- `osu.Game/Beatmaps/BeatmapManager.cs` (line ~400)
+- `osu.Game/Beatmaps/FramedBeatmapClock.cs`
+- `osu.Game/Database/RealmAccess.cs` (schema history, line ~67)
