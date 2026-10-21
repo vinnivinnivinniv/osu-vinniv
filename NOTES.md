@@ -806,3 +806,8 @@ native mania map of the same content. What reduces score is applying a
 3. **Random Button Logic**: Currently selects a random folder. Fix it to pick a random *difficulty* (weighted by the number of diffs per folder).
 4. **Left Click Plumbing**: Add `SDL_EVENT_MOUSE_BUTTON_DOWN` handling globally so the game can be played/tested with a mouse.
 5. **Song Select Accordion**: Revamp the list. Only the selected beatmap folder expands to show its difficulties. All other folders collapse to just the main title and thumbnail.
+
+## Taiko-to-Mania Quirk (Not a Bug)
+Lazer does not convert non-standard maps to Mania, but we do as a feature.
+Because of this, Taiko maps that have videos will render the video squished to the bottom-left (Taiko's native layout) when converted to Mania. 
+This is expected behavior based on the source mode. Laugh at it and move on.

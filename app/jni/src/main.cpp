@@ -17,6 +17,7 @@
 #include "map_sample_bank.h"
 #include "bundled_sounds.h"
 #include <sys/stat.h>
+#include <map>
 
 // Write bundled default sounds to the files dir on first launch.
 // Files already present are left alone so a user can override them.
@@ -43,7 +44,7 @@ static void ensure_bundled_sounds(const char* base_dir) {
     }
 }
 
-enum class AppState { SongSelect, Playing, Result, Settings };
+enum class AppState { SongSelect, Interlude, Playing, Result, Settings };
 
 // Piecewise-linear OD interpolation. Anchor points are (od0, od5, od10).
 static double od_window(double od, double v0, double v5, double v10) {
@@ -537,6 +538,7 @@ int main(int argc, char* argv[]) {
     // current_hit_errors accumulates this play's non-miss d values
     // (positive = early press, since d = note.time - map_t).
     // session_medians keeps the median of the last N plays.
+    float  map_offset_ms = 0.0f;
     std::vector<double> current_hit_errors;
     std::vector<double> session_medians;
     int                 suggested_offset_ms = 0;  // 0 = no suggestion
@@ -754,7 +756,7 @@ int main(int argc, char* argv[]) {
         // shifts visuals later than wall clock but judgement still
         // uses wall clock — resulting in positive offset feeling
         // "reversed" (you must press late for Perfect).
-        map_t += audio_drift_ms + cfg_audio_offset_ms;
+        map_t += audio_drift_ms + map_offset_ms;
         double od = map.od;
         double p_win  = std::floor(od_window(od, 22.4, 19.4, 13.9)) + 0.5;
         double g_win  = std::floor(od_window(od, 64, 49, 34)) + 0.5;
@@ -1002,6 +1004,13 @@ int main(int argc, char* argv[]) {
     bool   paused   = false;
     bool   resuming = false;
     bool   result_shown = false;
+    Uint64 interlude_start_tick = 0;
+    bool   interlude_touched = false;
+    bool   pending_map_load = false;
+    int    interlude_frames_shown = 0;
+    std::map<std::string, float> map_offsets;
+    Uint64 interlude_ignore_touch_until = 0;
+    Uint64 interlude_apply_flash_until = 0;
     // Rendered autoplay mode (test_replay.txt). Full render loop runs,
     // presses injected at exact note times. Feeds the frame-time log
     // without needing a human at the screen.
@@ -1540,6 +1549,11 @@ int main(int argc, char* argv[]) {
                 if (app_state == AppState::Settings) {
                     app_state = AppState::SongSelect;
                     SDL_Log("SETTINGS: back to song select");
+                } else if (app_state == AppState::Interlude) {
+                    pending_map_load = false;
+                    interlude_touched = false;
+                    app_state = AppState::SongSelect;
+                    SDL_Log("INTERLUDE: cancelled by back button");
                 } else if (app_state == AppState::SongSelect) {
                     running = false;   // exit from song select
                 } else if (app_state != AppState::Playing) {
@@ -1745,6 +1759,99 @@ int main(int argc, char* argv[]) {
                     judge_col(col, (double)SDL_GetTicks());
                 }
             }
+            // Interlude Input Handling
+            if (app_state == AppState::Interlude) {
+                if (SDL_GetTicks() < interlude_ignore_touch_until) continue;
+                if (e.type == SDL_EVENT_FINGER_DOWN) {
+                    float tx = e.tfinger.x * win_w;
+                    float ty = e.tfinger.y * win_h;
+                    
+                    // Check if touching the offset slider (scaled to win_w/win_h)
+                    // Note: The UI above was drawn at scale 3.0, so we need to map back.
+                    // Physical-pixel hit tests (matches render block layout)
+                    float slider_x = (float)win_w * 0.15f;
+                    float slider_y = (float)win_h - 150.0f;
+                    float slider_w = (float)win_w * 0.70f;
+                    float slider_h = 24.0f;
+                    float ab_x = slider_x + slider_w + 20.0f;
+                    float ab_w = 140.0f;
+                    float ab_h = 56.0f;
+                    float ab_y = slider_y + (slider_h - ab_h) * 0.5f;
+                    // Generous padding: finger is ~40-50px wide
+                    float hit_ab_x = ab_x - 20.0f;
+                    float hit_ab_y = ab_y - 20.0f;
+                    float hit_ab_w = ab_w + 40.0f;
+                    float hit_ab_h = ab_h + 40.0f;
+
+                    // Back button (bottom-left)
+                    if (tx >= 40.0f && tx <= 320.0f &&
+                        ty >= (float)win_h - 110.0f && ty <= (float)win_h - 40.0f) {
+                        interlude_touched = true;
+                        pending_map_load = false;
+                        preview_key.clear();
+                        app_state = AppState::SongSelect;
+                        SDL_Log("INTERLUDE: back button -> song select");
+                        continue;
+                    }
+
+                    // Slider region (wider than the visual track for easy tap)
+                    if (tx >= slider_x && tx <= slider_x + slider_w &&
+                        ty >= slider_y - 40.0f && ty <= slider_y + slider_h + 20.0f) {
+                        interlude_touched = true;
+                        float norm = (tx - slider_x) / slider_w;
+                        if (norm < 0.0f) norm = 0.0f;
+                        if (norm > 1.0f) norm = 1.0f;
+                        map_offset_ms = -200.0f + norm * 400.0f;
+                        continue;
+                    }
+
+                    // APPLY button — saves CURRENT slider value for this map.
+                    // Never auto-snaps to suggestion; user must drag slider
+                    // (or tap USE) first if they want the suggested value.
+                    if (tx >= hit_ab_x && tx <= hit_ab_x + hit_ab_w &&
+                        ty >= hit_ab_y && ty <= hit_ab_y + hit_ab_h) {
+                        interlude_touched = true;
+                        std::string path = songs[selected_index].osu_path;
+                        map_offsets[path] = map_offset_ms;
+                        interlude_apply_flash_until = SDL_GetTicks() + 900;
+                        SDL_Log("INTERLUDE: SAVED slider %+.0f ms for %s",
+                                (double)map_offset_ms, path.c_str());
+                        continue;
+                    }
+
+                    // USE SUGGESTED button — snaps slider to suggestion, does NOT save.
+                    // User must still tap APPLY to commit.
+                    if (suggested_offset_ms != 0) {
+                        float use_w = 90.0f;
+                        float use_h = 32.0f;
+                        float use_x = (float)win_w - use_w - 40.0f;
+                        float use_y = slider_y + slider_h + 16.0f;
+                        if (tx >= use_x - 20.0f && tx <= use_x + use_w + 20.0f &&
+                            ty >= use_y - 20.0f && ty <= use_y + use_h + 20.0f) {
+                            interlude_touched = true;
+                            map_offset_ms = (float)suggested_offset_ms;
+                            SDL_Log("INTERLUDE: snapped slider to %+d ms (not saved)",
+                                    suggested_offset_ms);
+                            continue;
+                        }
+                    }
+
+
+
+                    // Empty space -> start immediately
+                    app_state = AppState::Playing;
+                    audio_start_tick = SDL_GetTicks() + 2000;
+                    audio_drift_ms = 0.0;
+                    audio_queued = false;
+                    preview.stop();
+                    preview_key.clear();
+                    compute_geometry();
+                    SDL_Log("INTERLUDE: tapped to start");
+                    continue;
+                }
+                continue;
+            }
+
             // Song select — settings button works even while scanning
             // (songs empty). Short-circuit before the list-drag guard.
             if (app_state == AppState::SongSelect && e.type == SDL_EVENT_FINGER_DOWN) {
@@ -1892,12 +1999,11 @@ int main(int argc, char* argv[]) {
                                 continue;
                             }
 
-                            // second tap plays
-                            const auto& s = songs[hit];
-                            SDL_Log("SONGS: loading %s [%s]",
-                                    s.title.c_str(), s.version.c_str());
+                            // second tap plays — defer loading to Interlude
+                            SDL_Log("SONGS: selecting %s [%s] (deferred load)",
+                                    songs[hit].title.c_str(), songs[hit].version.c_str());
 
-                            // Reset gameplay state
+                            // Reset gameplay state (fast: array fills only)
                             std::fill(note_judged.begin(),  note_judged.end(),  false);
                             std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
                             std::fill(hold_active.begin(),  hold_active.end(),  false);
@@ -1914,79 +2020,29 @@ int main(int argc, char* argv[]) {
                             cnt_100 = 0; cnt_50 = 0; cnt_miss = 0;
                             miss_cursor = 0;
                             paused = false; resuming = false; result_shown = false;
+                            audio_queued = false;
+                            song_video_key.clear();
 
-                            Beatmap new_map;
-                            if (!parse_osu_file(s.osu_path, new_map)) {
-                                SDL_Log("SONGS: parse failed");
-                            } else {
-                                // Convert non-mania maps via converter.cpp.
-                                // Currently: deterministic column count from
-                                // difficulty + seeded RNG column assignment.
-                                // Real pattern generators are follow-up work
-                                // (see docs/mechanics.md).
-                                if (new_map.mode != 3) {
-                                    int old_mode = new_map.mode;
-                                    // Apply KeyMod if set (0 = auto).
-                                    // forced_columns bypasses the difficulty
-                                    // heuristic and matches ManiaModKey<N>.
-                                    int forced = (int)std::round(cfg_mods_key);
-                                    if (forced < 0) forced = 0;
-                                    if (forced > 10) forced = 10;
-                                    convert_to_mania(new_map, nullptr, forced);
-                                    if (forced > 0)
-                                        SDL_Log("KEYMOD: forced %dK (0.90x)", forced);
-                                    SDL_Log("CONVERT: mode=%d -> %dK, %zu notes",
-                                            old_mode, new_map.key_count,
-                                            new_map.notes.size());
-                                }
-                                map = new_map;
-                                rebuild_timing_positions();
-
-                                last_note_end = 0.0;
-                                hold_count = 0;
-                                for (const auto& n : map.notes) {
-                                    if (n.end_time > last_note_end) last_note_end = n.end_time;
-                                    if (n.is_hold) hold_count++;
-                                }
-                                note_judged.assign(map.notes.size(),  false);
-                                note_hit_time.assign(map.notes.size(), -1.0);
-                                hold_active.assign(map.notes.size(),  false);
-                                hold_started.assign(map.notes.size(), false);
-                                hold_broken.assign(map.notes.size(),  false);
-                                note_ghost.assign(map.notes.size(),   false);
-                                release_time.assign(map.notes.size(), 0.0);
-
-                                if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
-                                if (wav_data)     { SDL_free(wav_data); wav_data = nullptr; }
-                                SDL_AudioSpec spec = {};
-                                // Load per-map hitsounds from the song folder
-                                map_bank.load_from_folder(s.folder);
-                                SDL_Log("HITS: bank loaded (soft-hitnormal: %s) from %s",
-                                        map_bank.has("soft-hitnormal.wav") ? "yes" : "no",
-                                        s.folder.c_str());
-
-                                if (load_audio_to_pcm(s.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
-                                    audio_stream = SDL_OpenAudioDeviceStream(
-                                        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
-                                    if (audio_stream)
-                                        SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
-                                    SDL_Log("SONGS: audio %s loaded", s.audio_path.c_str());
-                                } else {
-                                    SDL_Log("SONGS: audio load failed: %s", SDL_GetError());
-                                }
-
-                                audio_queued = false;
-                song_video_key.clear();  // force re-request
-                                audio_start_tick = SDL_GetTicks() + 2000;
-                audio_drift_ms = 0.0;
-                                compute_geometry();
-                                app_state = AppState::Playing;
-                                SDL_Log("SONGS: entering Playing (%dK, %zu notes)",
-                                        map.key_count, map.notes.size());
+                            // Transition to Interlude; ALL heavy loading happens there
+                            app_state = AppState::Interlude;
+                            pending_map_load = true;
+                            interlude_frames_shown = 0;
+                            interlude_start_tick = SDL_GetTicks() + 2000;
+                            interlude_touched = false;
+                            interlude_ignore_touch_until = SDL_GetTicks() + 300;
+                            {
+                                std::string path = songs[selected_index].osu_path;
+                                bool has_saved = map_offsets.count(path) > 0;
+                                map_offset_ms = has_saved ? map_offsets[path] : cfg_audio_offset_ms;
+                                SDL_Log("INTERLUDE: entry offset=%+.0f (%s) for %s",
+                                        (double)map_offset_ms,
+                                        has_saved ? "saved" : "default",
+                                        path.c_str());
                             }
+                            SDL_Log("INTERLUDE: entered from SongSelect (loading deferred)");
                         }
                     }
-                    song_drag_id = (SDL_FingerID)-1;
+                                        song_drag_id = (SDL_FingerID)-1;
                     continue;
                 }
             }
@@ -2149,7 +2205,23 @@ int main(int argc, char* argv[]) {
                             audio_start_tick = SDL_GetTicks() + 2000;
                 audio_drift_ms = 0.0;
                             paused = false;
-                            SDL_Log("PAUSE: retry");
+                            app_state = AppState::Interlude;
+                            interlude_start_tick = SDL_GetTicks() + 2000;
+                            interlude_touched = false;
+                            interlude_ignore_touch_until = SDL_GetTicks() + 300;
+                            {
+                                std::string retry_path = (selected_index >= 0 &&
+                                    selected_index < (int)songs.size())
+                                    ? songs[selected_index].osu_path : std::string();
+                                bool has_saved = !retry_path.empty() &&
+                                    map_offsets.count(retry_path) > 0;
+                                map_offset_ms = has_saved
+                                    ? map_offsets[retry_path]
+                                    : cfg_audio_offset_ms;
+                                SDL_Log("PAUSE: retry (Interlude) offset=%+.0f (%s)",
+                                        (double)map_offset_ms,
+                                        has_saved ? "saved" : "default");
+                            }
                         } else {
                             record_play_median();
                             // Return to song select
@@ -2390,7 +2462,7 @@ int main(int argc, char* argv[]) {
         // selection change or freed at app exit.
 
         // ---- Song preview --------------------------------------------
-        if (app_state == AppState::SongSelect && !songs.empty()) {
+        if ((app_state == AppState::SongSelect || app_state == AppState::Interlude) && !songs.empty()) {
             const auto& sel = songs[selected_index];
             std::string want_key = sel.folder + "|" + std::to_string(sel.preview_time);
             if (want_key != preview_key) {
@@ -2433,7 +2505,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        now_ms += audio_drift_ms + cfg_audio_offset_ms;
+        now_ms += audio_drift_ms + map_offset_ms;
         if (paused || resuming)
             now_ms = (double)pause_started_tick - (double)audio_start_tick;
 
@@ -2556,6 +2628,7 @@ int main(int argc, char* argv[]) {
             miss_cursor++;
         }
 
+
         SDL_SetRenderDrawColor(renderer, 20, 20, 30, 255);
         SDL_RenderClear(renderer);
 
@@ -2644,71 +2717,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Touch bounding boxes — semi-transparent white outlines over each
-        // tappable region. Style follows lazer: 2px border, dim fill,
-        // brighter on press. Layout-dependent.
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-        {
-            // Fixed-opacity boxes. Pressed-state flash removed — user
-            // feedback was that brightening on touch obscured the note
-            // columns underneath and read as visual noise during fast
-            // play. Dim steady boxes serve as spatial anchors only.
-            auto region_alpha = [&](bool) -> Uint8 { return 20; };
-            auto border_alpha = [&](bool) -> Uint8 { return 90; };
-
-            if (cfg_touch_layout == 1 && keys == 4) {
-                // Quadrant mode — 2x2 grid over the whole screen.
-                float w = (float)win_w * 0.5f;
-                float h = (float)win_h * 0.5f;
-                // Map (row, col) of the visual grid to the actual column
-                // each quadrant taps. Matches find_col_quadrant().
-                //   TL=0  TR=3
-                //   BL=1  BR=2
-                int quad_col[2][2] = {{0, 3}, {1, 2}};
-                for (int r = 0; r < 2; r++) {
-                    for (int c = 0; c < 2; c++) {
-                        int col = quad_col[r][c];
-                        bool pressed = column_pressed[col];
-                        float bx = c * w;
-                        float by = r * h;
-                        // Fill
-                        SDL_SetRenderDrawColor(renderer, 255, 255, 255, region_alpha(pressed));
-                        SDL_FRect fill = { bx + 4.0f, by + 4.0f, w - 8.0f, h - 8.0f };
-                        SDL_RenderFillRect(renderer, &fill);
-                        // Border
-                        SDL_SetRenderDrawColor(renderer, 255, 255, 255, border_alpha(pressed));
-                        SDL_FRect border = { bx + 4.0f, by + 4.0f, w - 8.0f, h - 8.0f };
-                        SDL_RenderRect(renderer, &border);
-                    }
-                }
-            } else if (cfg_touch_layout == 2) {
-                // Screen mode — N vertical strips over the whole window.
-                float strip_w = (float)win_w / (float)keys;
-                for (int c = 0; c < keys; c++) {
-                    bool pressed = (c < 16) && column_pressed[c];
-                    float bx = c * strip_w;
-                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, region_alpha(pressed));
-                    SDL_FRect fill = { bx + 4.0f, 4.0f, strip_w - 8.0f, (float)win_h - 8.0f };
-                    SDL_RenderFillRect(renderer, &fill);
-                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, border_alpha(pressed));
-                    SDL_FRect border = { bx + 4.0f, 4.0f, strip_w - 8.0f, (float)win_h - 8.0f };
-                    SDL_RenderRect(renderer, &border);
-                }
-            } else {
-                // Column mode — one box per playfield column, tall.
-                for (int c = 0; c < keys; c++) {
-                    bool pressed = (c < 16) && column_pressed[c];
-                    float bx = playfield_x + c * col_w;
-                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, region_alpha(pressed));
-                    SDL_FRect fill = { bx + 2.0f, 4.0f, col_w - 4.0f, (float)win_h - 8.0f };
-                    SDL_RenderFillRect(renderer, &fill);
-                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, border_alpha(pressed));
-                    SDL_FRect border = { bx + 2.0f, 4.0f, col_w - 4.0f, (float)win_h - 8.0f };
-                    SDL_RenderRect(renderer, &border);
-                }
-            }
-        }
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        // Touch bounding boxes removed by user request (visual noise)
 
         SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
         for (int c = 1; c < keys; c++) {
@@ -3322,6 +3331,268 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderScale(renderer, 1.0f, 1.0f);
             }
         }
+        // ---- Interlude ----
+        if (app_state == AppState::Interlude) {
+            // Draw the background (using same logic as SongSelect)
+            SDL_SetRenderViewport(renderer, NULL);
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            SDL_SetRenderDrawColor(renderer, 15, 15, 25, 255);
+            SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
+            SDL_RenderFillRect(renderer, &bg_full);
+
+            SDL_Texture* bg_tex = nullptr;
+            int bg_w = 0, bg_h = 0;
+            float bg_ar = 0.0f;
+            // Interlude forces the static background image, ignoring video
+            if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
+                bg_tex = song_bg_tex;
+                bg_w = song_bg_w;
+                bg_h = song_bg_h;
+                bg_ar = (float)bg_w / bg_h;
+            }
+            if (bg_tex && bg_w > 0 && bg_h > 0) {
+                float win_ar = (float)win_w / win_h;
+                SDL_FRect dst;
+                if (win_ar > bg_ar) {
+                    float w = (float)win_w;
+                    float h = w / bg_ar;
+                    dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                } else {
+                    float h = (float)win_h;
+                    float w = h * bg_ar;
+                    dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                }
+                SDL_SetTextureAlphaMod(bg_tex, 255);
+                SDL_RenderTexture(renderer, bg_tex, NULL, &dst);
+            }
+
+            // 70% Dim Overlay
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
+            SDL_RenderFillRect(renderer, &bg_full);
+
+            // =========================================================
+            // Overlay UI — lazer-style beatmap intro layout.
+            //   - Top:   "Loading..." (when pending) or blank
+            //   - 30%:   title (5x, centered)
+            //   - +90px: artist (3x, centered)
+            //   - +150:  difficulty + star pill (2.5x, centered)
+            //   - 55%:   spinner (when pending)
+            //   - Bottom: audio offset slider + APPLY
+            //   - Bottom-left: back button (lazer pink, matches screenshot)
+            //   - Bottom-center: tap-to-play hint
+            // =========================================================
+            const auto& sel = songs[selected_index];
+            const float CHAR_W = (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE;
+
+            // Helper: draw text horizontally centered at scale S, top y_phys.
+            auto center_text = [&](float scale, float y_phys, const char* txt,
+                                   Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
+                if (!txt || !txt[0]) return;
+                int len = (int)strlen(txt);
+                float w_phys = (float)len * CHAR_W * scale;
+                float x_log  = ((float)win_w - w_phys) * 0.5f / scale;
+                SDL_SetRenderScale(renderer, scale, scale);
+                SDL_SetRenderDrawColor(renderer, r, g, b, a);
+                SDL_RenderDebugText(renderer, x_log, y_phys / scale, txt);
+            };
+
+            // Top: "Loading..."
+            if (pending_map_load) {
+                center_text(3.0f, 24.0f, "Loading...", 255, 255, 255, 255);
+            }
+
+            // Center stack
+            float y0 = (float)win_h * 0.30f;
+            center_text(5.0f, y0, sel.title.c_str(), 255, 255, 255, 255);
+            center_text(3.0f, y0 + 90.0f, sel.artist.c_str(), 210, 210, 230, 255);
+
+            // Difficulty + star pill on the same line, combined centered
+            {
+                char diff[256];
+                SDL_snprintf(diff, sizeof(diff), "[%dK] %s",
+                             sel.key_count, sel.version.c_str());
+                char star[32];
+                SDL_snprintf(star, sizeof(star), "%.2f", sel.stars);
+
+                const float diff_scale = 2.5f;
+                const float pill_w = 90.0f;
+                const float pill_h = 32.0f;
+                const float gap = 16.0f;
+                float diff_w = (float)strlen(diff) * CHAR_W * diff_scale;
+                float total_w = diff_w + gap + pill_w;
+                float start_x = ((float)win_w - total_w) * 0.5f;
+                float line_y  = y0 + 150.0f;
+
+                SDL_SetRenderScale(renderer, diff_scale, diff_scale);
+                SDL_SetRenderDrawColor(renderer, 220, 220, 240, 255);
+                SDL_RenderDebugText(renderer, start_x / diff_scale,
+                                    line_y / diff_scale, diff);
+
+                // Star pill
+                float pill_x = start_x + diff_w + gap;
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                SDL_SetRenderDrawColor(renderer, 70, 200, 110, 255);
+                SDL_FRect pill = { pill_x, line_y, pill_w, pill_h };
+                SDL_RenderFillRect(renderer, &pill);
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                float sw = (float)strlen(star) * CHAR_W * 2.0f;
+                SDL_RenderDebugText(renderer,
+                    (pill_x + (pill_w - sw) * 0.5f) / 2.0f,
+                    (line_y + (pill_h - CHAR_W * 2.0f) * 0.5f) / 2.0f, star);
+            }
+
+            // Spinner
+            if (pending_map_load) {
+                float cx = (float)win_w * 0.5f;
+                float cy = (float)win_h * 0.55f;
+                float r_out = 34.0f, r_in = 22.0f;
+                const int N = 12;
+                double t = (double)SDL_GetTicks() * 0.008;
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                for (int i = 0; i < N; i++) {
+                    double a = t + (double)i * (2.0 * M_PI / N);
+                    Uint8 bright = (Uint8)(40 + (int)(200.0 * (double)i / N));
+                    SDL_SetRenderDrawColor(renderer, bright, bright, 255, 255);
+                    SDL_RenderLine(renderer,
+                        cx + r_in  * (float)std::cos(a),
+                        cy + r_in  * (float)std::sin(a),
+                        cx + r_out * (float)std::cos(a),
+                        cy + r_out * (float)std::sin(a));
+                }
+            }
+
+            // ---- Bottom panel: audio offset slider ----
+            // Physical-pixel coords (matches the touch handler below).
+            float slider_x = (float)win_w * 0.15f;
+            float slider_y = (float)win_h - 150.0f;
+            float slider_w = (float)win_w * 0.70f;
+            float slider_h = 24.0f;
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            SDL_SetRenderDrawColor(renderer, 45, 50, 65, 255);
+            SDL_FRect track = { slider_x, slider_y, slider_w, slider_h };
+            SDL_RenderFillRect(renderer, &track);
+            float norm = (map_offset_ms - (-200.0f)) / 400.0f;
+            if (norm < 0.0f) norm = 0.0f;
+            if (norm > 1.0f) norm = 1.0f;
+            SDL_SetRenderDrawColor(renderer, 255, 200, 60, 255);  // lazer yellow
+            SDL_FRect fill = { slider_x, slider_y, slider_w * norm, slider_h };
+            SDL_RenderFillRect(renderer, &fill);
+
+            // Header above slider: makes clear this is the CURRENT map offset
+            {
+                char offset_buf[96];
+                SDL_snprintf(offset_buf, sizeof(offset_buf),
+                             "Map offset (this map only): %+.0f ms",
+                             (double)map_offset_ms);
+                center_text(2.0f, slider_y - 40.0f, offset_buf, 255, 220, 130, 255);
+            }
+
+            // APPLY button — saves current slider value for this map.
+            // Label shows "SAVE <value>" so the user sees exactly what will
+            // be committed. Flash "SAVED!" confirms the tap.
+            float ab_x = slider_x + slider_w + 20.0f;
+            float ab_w = 160.0f;
+            float ab_h = 56.0f;
+            float ab_y = slider_y + (slider_h - ab_h) * 0.5f;
+            bool apply_flash = SDL_GetTicks() < interlude_apply_flash_until;
+
+            Uint8 r_bg = 60, g_bg = 110, b_bg = 160;
+            if (apply_flash) { r_bg = 60; g_bg = 190; b_bg = 90; }
+            SDL_SetRenderDrawColor(renderer, r_bg, g_bg, b_bg, 255);
+            SDL_FRect ab = { ab_x, ab_y, ab_w, ab_h };
+            SDL_RenderFillRect(renderer, &ab);
+
+            char ab_label[40];
+            if (apply_flash) {
+                SDL_snprintf(ab_label, sizeof(ab_label), "SAVED!");
+            } else {
+                SDL_snprintf(ab_label, sizeof(ab_label), "SAVE %+.0f",
+                             (double)map_offset_ms);
+            }
+            SDL_SetRenderScale(renderer, 2.5f, 2.5f);
+            SDL_SetRenderDrawColor(renderer, 220, 240, 255, 255);
+            const float ab_scale = 2.5f;
+            float ab_text_w = (float)strlen(ab_label) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * ab_scale;
+            SDL_RenderDebugText(renderer,
+                (ab_x + (ab_w - ab_text_w) * 0.5f) / ab_scale,
+                (ab_y + (ab_h - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * ab_scale) * 0.5f) / ab_scale,
+                ab_label);
+            if (apply_flash) {
+                SDL_SetRenderDrawColor(renderer, 180, 255, 180, 255);
+                SDL_RenderDebugText(renderer,
+                    (ab_x + ab_w + 12.0f) / 2.0f,
+                    (ab_y + 10.0f) / 2.0f, "Saved!");
+            }
+
+            // Suggested offset row: text + USE button (only when suggestion != 0)
+            // USE snaps the slider to the suggested value; user still has to
+            // tap APPLY to commit. Two explicit steps, no surprise saves.
+            if (suggested_offset_ms != 0) {
+                float use_w = 90.0f;
+                float use_h = 32.0f;
+                float use_x = (float)win_w - use_w - 40.0f;
+                float use_y = slider_y + slider_h + 16.0f;
+
+                char sug[96];
+                SDL_snprintf(sug, sizeof(sug),
+                             "Suggested: %+d ms (%zu play%s)",
+                             suggested_offset_ms,
+                             session_medians.size(),
+                             session_medians.size() == 1 ? "" : "s");
+                const float sug_scale = 2.0f;
+                float sug_w = (float)strlen(sug) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * sug_scale;
+                float sug_x_start = (use_x - 16.0f) - sug_w;
+                if (sug_x_start < 40.0f) sug_x_start = 40.0f;
+
+                SDL_SetRenderScale(renderer, sug_scale, sug_scale);
+                SDL_SetRenderDrawColor(renderer, 220, 220, 160, 255);
+                SDL_RenderDebugText(renderer,
+                    sug_x_start / sug_scale,
+                    (use_y + 4.0f) / sug_scale, sug);
+
+                // USE button background
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                SDL_SetRenderDrawColor(renderer, 110, 80, 150, 255);
+                SDL_FRect use_btn = { use_x, use_y, use_w, use_h };
+                SDL_RenderFillRect(renderer, &use_btn);
+                // USE label
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                SDL_SetRenderDrawColor(renderer, 230, 210, 255, 255);
+                const float use_scale = 2.0f;
+                float use_label_w = 3.0f * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * use_scale;
+                SDL_RenderDebugText(renderer,
+                    (use_x + (use_w - use_label_w) * 0.5f) / use_scale,
+                    (use_y + (use_h - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * use_scale) * 0.5f) / use_scale,
+                    "USE");
+            }
+
+            // Tap-to-play hint, bottom-center
+            center_text(2.0f, (float)win_h - 60.0f,
+                        "Tap anywhere or wait 2s to play",
+                        180, 180, 200, 255);
+
+            // Back button — lazer pink, bottom-left (screenshot 1)
+            {
+                float bx = 40.0f;
+                float by = (float)win_h - 110.0f;
+                float bw = 280.0f;
+                float bh = 70.0f;
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                SDL_SetRenderDrawColor(renderer, 215, 60, 155, 255);
+                SDL_FRect back = { bx, by, bw, bh };
+                SDL_RenderFillRect(renderer, &back);
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                SDL_RenderDebugText(renderer, (bx + 26.0f) / 3.0f,
+                                    (by + 22.0f) / 3.0f, "Back");
+            }
+
+            interlude_frames_shown++;
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+        }
+        
         // ---- Song select ----
         if (app_state == AppState::SongSelect) {
             // Force clean state for background rendering
@@ -3682,6 +3953,84 @@ int main(int argc, char* argv[]) {
         }
 
         SDL_RenderPresent(renderer);
+
+        // Interlude Auto-start Timer & Loading
+        if (app_state == AppState::Interlude) {
+            if (pending_map_load && interlude_frames_shown < 30) {
+                // Let interlude render for a few frames first
+            } else if (pending_map_load) {
+                // This blocks the thread, but since we rendered one frame of Interlude, 
+                // the user sees the loading screen before the freeze.
+                pending_map_load = false;
+                Beatmap new_map;
+                if (selected_index >= 0 && selected_index < (int)songs.size()
+                    && parse_osu_file(songs[selected_index].osu_path, new_map))
+                {
+                    const auto& sel = songs[selected_index];
+                    if (new_map.mode != 3) {
+                        int forced = (int)std::round(cfg_mods_key);
+                        if (forced < 0) forced = 0;
+                        if (forced > 10) forced = 10;
+                        convert_to_mania(new_map, nullptr, forced);
+                        if (forced > 0) SDL_Log("KEYMOD: forced %dK (0.90x)", forced);
+                        SDL_Log("CONVERT: mode=%d -> %dK, %zu notes",
+                                new_map.mode, new_map.key_count, new_map.notes.size());
+                    }
+                    map = new_map;
+                    rebuild_timing_positions();
+
+                    last_note_end = 0.0;
+                    hold_count = 0;
+                    for (const auto& n : map.notes) {
+                        if (n.end_time > last_note_end) last_note_end = n.end_time;
+                        if (n.is_hold) hold_count++;
+                    }
+                    note_judged.assign(map.notes.size(),  false);
+                    note_hit_time.assign(map.notes.size(), -1.0);
+                    hold_active.assign(map.notes.size(),  false);
+                    hold_started.assign(map.notes.size(), false);
+                    hold_broken.assign(map.notes.size(),  false);
+                    note_ghost.assign(map.notes.size(),   false);
+                    release_time.assign(map.notes.size(), 0.0);
+
+                    if (audio_stream) { SDL_DestroyAudioStream(audio_stream); audio_stream = nullptr; }
+                    if (wav_data) { SDL_free(wav_data); wav_data = nullptr; }
+                    SDL_AudioSpec spec = {};
+                    map_bank.load_from_folder(sel.folder);
+                    SDL_Log("HITS: bank loaded from %s", sel.folder.c_str());
+                    if (load_audio_to_pcm(sel.audio_path.c_str(), &spec, &wav_data, &wav_len)) {
+                        audio_stream = SDL_OpenAudioDeviceStream(
+                            SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+                        if (audio_stream) SDL_SetAudioStreamGain(audio_stream, cfg_music_vol);
+                        SDL_Log("SONGS: audio %s loaded", sel.audio_path.c_str());
+                    } else {
+                        SDL_Log("SONGS: audio load failed: %s", SDL_GetError());
+                    }
+
+                    compute_geometry();
+                    audio_start_tick = SDL_GetTicks() + 2000;
+                    audio_drift_ms = 0.0;
+                    audio_queued = false;
+                    interlude_start_tick = SDL_GetTicks() + 2000;
+                    SDL_Log("INTERLUDE: map load complete (%dK, %zu notes)",
+                            map.key_count, map.notes.size());
+                } else {
+                    SDL_Log("INTERLUDE: map load failed!");
+                    app_state = AppState::SongSelect;
+                }
+            }
+
+            if (!interlude_touched && SDL_GetTicks() > interlude_start_tick) {
+                app_state = AppState::Playing;
+                audio_start_tick = SDL_GetTicks() + 2000;
+                audio_drift_ms = 0.0;
+                audio_queued = false; // Trigger map audio
+                preview.stop();
+                preview_key.clear();
+                compute_geometry();
+                SDL_Log("INTERLUDE: auto-start timer expired");
+            }
+        }
 
         frames++;
         Uint64 now = SDL_GetTicks();
