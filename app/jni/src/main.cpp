@@ -512,6 +512,14 @@ int main(int argc, char* argv[]) {
     int    last_judgement_tier  = -1;    // 0=P 1=Great 2=Good 3=OK 4=Meh 5=Miss
     double last_judgement_time  = -1.0;  // SDL_GetTicks() when fired
     int    last_judgement_delta = 0;     // +1 early, -1 late, 0 on-time/miss
+
+    // Hit-error tracking for the "suggested offset" feature.
+    // current_hit_errors accumulates this play's non-miss d values
+    // (positive = early press, since d = note.time - map_t).
+    // session_medians keeps the median of the last N plays.
+    std::vector<double> current_hit_errors;
+    std::vector<double> session_medians;
+    int                 suggested_offset_ms = 0;  // 0 = no suggestion
     int   cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
     std::vector<bool>   hold_active(map.notes.size(), false);
@@ -798,6 +806,9 @@ int main(int argc, char* argv[]) {
             last_judgement_tier  = tier;
             last_judgement_time  = (double)SDL_GetTicks();
             last_judgement_delta = (d > 0.0) ? 1 : (d < 0.0 ? -1 : 0);
+            // Accumulate for suggested-offset analysis. Skip misses
+            // (tier 5) because d for an unpressed note is meaningless.
+            if (tier != 5) current_hit_errors.push_back(d);
         }
 
         if      (a <= p_win)  cnt_perfect++;
@@ -1000,8 +1011,25 @@ int main(int argc, char* argv[]) {
                 size_t tl = strlen(tbuf);
                 while (tl > 0 && (tbuf[tl-1]=='\n' || tbuf[tl-1]=='\r')) tbuf[--tl] = 0;
             }
+            // Optional additional lines: bias_ms=N, offset_ms=N.
+            // Used by the deterministic offset-formula test below.
+            int bias_ms = 0;
+            int offset_ms = 0;
+            char lbuf[256];
+            while (fgets(lbuf, sizeof(lbuf), tf)) {
+                size_t ll = strlen(lbuf);
+                while (ll > 0 && (lbuf[ll-1]=='\n' || lbuf[ll-1]=='\r')) lbuf[--ll] = 0;
+                if (strncmp(lbuf, "bias_ms=", 8) == 0) bias_ms = atoi(lbuf + 8);
+                else if (strncmp(lbuf, "offset_ms=", 10) == 0) offset_ms = atoi(lbuf + 10);
+            }
             fclose(tf);
             remove(trigger);   // one-shot
+
+            // Apply the starting offset before the run. The test verifies
+            // that a given (bias, offset) pair produces the expected d and
+            // suggested values — if judge_col ignores offset, case 3 below
+            // fails and we know the clock sync is broken.
+            cfg_audio_offset_ms = (float)offset_ms;
 
             SDL_Log("TEST: autoplay on %s", tbuf);
             Beatmap tm;
@@ -1034,6 +1062,7 @@ int main(int argc, char* argv[]) {
             miss_cursor = 0;
 
             audio_start_tick = 0;    // sim_time IS map time
+            audio_drift_ms   = 0.0;  // headless: no drift, deterministic
 
             size_t autoplay_idx = 0;
             auto drain_to = [&](double t) {
@@ -1071,7 +1100,9 @@ int main(int argc, char* argv[]) {
             while (autoplay_idx < map.notes.size()) {
                 double nt = map.notes[autoplay_idx].time;
                 int c = map.notes[autoplay_idx].column;
-                judge_col(c, nt);
+                // Inject at nt + bias_ms. audio_start_tick=0 in headless
+                // mode so map_t = nt + bias_ms + offset_ms.
+                judge_col(c, (double)audio_start_tick + nt + bias_ms);
                 drain_to(nt);
                 autoplay_idx++;
             }
@@ -1094,7 +1125,40 @@ int main(int argc, char* argv[]) {
                     pass ? "PASS" : "FAIL",
                     map.notes.size(), hold_count, expected_perfect, cnt_perfect,
                     cnt_300, cnt_200, cnt_100, cnt_50, cnt_miss, max_combo, acc);
-            return pass ? 0 : 1;
+
+            // =========================================================
+            // Offset formula verification (deterministic).
+            // Injection at (note.time + bias_ms), cfg_audio_offset_ms
+            // preset to offset_ms, audio_start_tick=0 in headless mode.
+            // Then judge_col produces d = -bias_ms - offset_ms for every
+            // press, so median_d = -bias_ms - offset_ms and
+            // suggested = offset_ms + median_d = -bias_ms.
+            // Both invariants must hold. Case 3 (bias=20, offset=-20)
+            // would FAIL if judge_col ignored cfg_audio_offset_ms.
+            // =========================================================
+            double expected_d = -(double)bias_ms - (double)offset_ms;
+            double expected_suggested = -(double)bias_ms;
+
+            double actual_median_d = 0.0;
+            if (!current_hit_errors.empty()) {
+                std::vector<double> sorted = current_hit_errors;
+                std::sort(sorted.begin(), sorted.end());
+                actual_median_d = sorted[sorted.size() / 2];
+            }
+            double actual_suggested = (double)cfg_audio_offset_ms + actual_median_d;
+
+            bool median_ok = std::abs(actual_median_d - expected_d) < 0.5;
+            bool formula_ok = std::abs(actual_suggested - expected_suggested) < 0.5;
+            bool formula_pass = median_ok && formula_ok;
+            SDL_Log("OFFSET_FORMULA: %s bias_ms=%+d offset_ms=%+d "
+                    "median_d=%+.1f (expected %+.1f) "
+                    "suggested=%+.1f (expected %+.1f)",
+                    formula_pass ? "PASS" : "FAIL",
+                    bias_ms, offset_ms,
+                    actual_median_d, expected_d,
+                    actual_suggested, expected_suggested);
+
+            return (pass && formula_pass) ? 0 : 1;
         }
     }
 
@@ -1457,6 +1521,27 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_EVENT_FINGER_DOWN && result_shown) {
                 float rtx = e.tfinger.x * (float)win_w;
                 float rty = e.tfinger.y * (float)win_h;
+
+                // Suggested-offset APPLY button — checked before RETRY/BACK
+                // so it can live above them without hit-test overlap.
+                if (suggested_offset_ms != 0 &&
+                    std::abs((double)suggested_offset_ms - (double)cfg_audio_offset_ms) >= 1.0)
+                {
+                    float ab_x = ((float)win_w - 320.0f) * 0.5f;
+                    float ab_y = (float)win_h - 280.0f;
+                    float ab_w = 320.0f;
+                    float ab_h = 60.0f;
+                    if (rtx >= ab_x && rtx <= ab_x + ab_w &&
+                        rty >= ab_y && rty <= ab_y + ab_h)
+                    {
+                        cfg_audio_offset_ms = (float)suggested_offset_ms;
+                        suggested_offset_ms = 0;
+                        save_settings();
+                        SDL_Log("OFFSET: applied, new offset=%.0f",
+                                (double)cfg_audio_offset_ms);
+                        continue;
+                    }
+                }
                 float btn_w = 240.0f, btn_h = 90.0f;
                 float gap   = 40.0f;
                 float total_w = btn_w * 2 + gap;
@@ -2245,6 +2330,31 @@ int main(int argc, char* argv[]) {
             !map.notes.empty() &&
             now_ms > last_note_end + 2000.0)
         {
+            // Compute this play's median hit error and update
+            // suggested_offset_ms. Median over the last N plays keeps
+            // a single bad play from swinging the recommendation.
+            // Formula: suggested = current_offset + median_d, because
+            // d = note.time - map_t (positive = early press); a
+            // positive median means the game clock is reading too
+            // late relative to perception, so advance offset.
+            if (!current_hit_errors.empty()) {
+                std::vector<double> sorted = current_hit_errors;
+                std::sort(sorted.begin(), sorted.end());
+                double med = sorted[sorted.size() / 2];
+                session_medians.push_back(med);
+                if (session_medians.size() > 5)
+                    session_medians.erase(session_medians.begin());
+                std::vector<double> all = session_medians;
+                std::sort(all.begin(), all.end());
+                double session_med = all[all.size() / 2];
+                suggested_offset_ms = (int)std::round(
+                    (double)cfg_audio_offset_ms + session_med);
+                SDL_Log("OFFSET: this=%+.1f  session=%+.1f  suggested=%+d (current=%.0f)",
+                        med, session_med, suggested_offset_ms,
+                        (double)cfg_audio_offset_ms);
+            }
+            current_hit_errors.clear();
+
             result_shown = true;
             if (audio_stream) SDL_PauseAudioStreamDevice(audio_stream);
             SDL_Log("RESULT: entered");
@@ -2794,6 +2904,45 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
             SDL_FRect full = { 0, 0, (float)win_w, (float)win_h };
             SDL_RenderFillRect(renderer, &full);
+
+            // Suggested offset hint + APPLY, above the bottom buttons.
+            // Only shown when there's a recommendation that differs
+            // meaningfully from the current setting.
+            if (suggested_offset_ms != 0 &&
+                std::abs((double)suggested_offset_ms - (double)cfg_audio_offset_ms) >= 1.0)
+            {
+                char sob[128];
+                SDL_snprintf(sob, sizeof(sob),
+                             "Suggested offset: %+d ms (last %zu play%s)",
+                             suggested_offset_ms, session_medians.size(),
+                             session_medians.size() == 1 ? "" : "s");
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                SDL_SetRenderDrawColor(renderer, 220, 220, 140, 240);
+                int slen = (int)strlen(sob);
+                float sw = (float)slen * 8.0f * 2.0f;
+                float sx = ((float)win_w - sw) * 0.5f / 2.0f;
+                float sy = ((float)win_h - 260.0f) / 2.0f;
+                SDL_RenderDebugText(renderer, sx, sy, sob);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+                float ab_x = ((float)win_w - 320.0f) * 0.5f;
+                float ab_y = (float)win_h - 280.0f;
+                float ab_w = 320.0f;
+                float ab_h = 60.0f;
+                SDL_SetRenderDrawColor(renderer, 40, 70, 90, 240);
+                SDL_FRect ab = { ab_x, ab_y, ab_w, ab_h };
+                SDL_RenderFillRect(renderer, &ab);
+                SDL_SetRenderDrawColor(renderer, 140, 200, 240, 255);
+                SDL_RenderRect(renderer, &ab);
+                SDL_SetRenderScale(renderer, 3.0f, 3.0f);
+                SDL_SetRenderDrawColor(renderer, 220, 240, 255, 255);
+                {
+                    float tx = (ab_x + (ab_w - 5 * 24.0f) * 0.5f) / 3.0f;
+                    float ty = (ab_y + (ab_h - 24.0f) * 0.5f) / 3.0f;
+                    SDL_RenderDebugText(renderer, tx, ty, "APPLY");
+                }
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
 
             // Touch buttons at bottom: [RETRY] [BACK].
             // Hit-tested in FINGER_DOWN handler (below, in event loop).
