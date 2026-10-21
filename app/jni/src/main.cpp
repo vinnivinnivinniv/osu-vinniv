@@ -540,6 +540,38 @@ int main(int argc, char* argv[]) {
     std::vector<double> current_hit_errors;
     std::vector<double> session_medians;
     int                 suggested_offset_ms = 0;  // 0 = no suggestion
+
+    // Compute this play's median hit error, push to session_medians
+    // (ring, max 5), recompute suggested_offset_ms = round(cfg +
+    // session_median), then clear current_hit_errors. Called from:
+    //   - natural end of map (result screen entry)
+    //   - pause menu -> retry
+    //   - pause menu -> return to song select
+    // This makes unfinished plays count toward the suggestion.
+    //
+    // Formula: suggested = current_offset + median_d, because
+    // d = note.time - map_t (positive = early press); a positive
+    // median means the game clock is reading too late relative to
+    // perception, so advance offset.
+    auto record_play_median = [&]() {
+        if (!current_hit_errors.empty()) {
+            std::vector<double> sorted = current_hit_errors;
+            std::sort(sorted.begin(), sorted.end());
+            double med = sorted[sorted.size() / 2];
+            session_medians.push_back(med);
+            if (session_medians.size() > 5)
+                session_medians.erase(session_medians.begin());
+            std::vector<double> all = session_medians;
+            std::sort(all.begin(), all.end());
+            double session_med = all[all.size() / 2];
+            suggested_offset_ms = (int)std::round(
+                (double)cfg_audio_offset_ms + session_med);
+            SDL_Log("OFFSET: this=%+.1f  session=%+.1f  suggested=%+d (current=%.0f)",
+                    med, session_med, suggested_offset_ms,
+                    (double)cfg_audio_offset_ms);
+        }
+        current_hit_errors.clear();
+    };
     int   cnt_100 = 0, cnt_50 = 0, cnt_miss = 0;
     size_t miss_cursor = 0;
     std::vector<bool>   hold_active(map.notes.size(), false);
@@ -1963,6 +1995,35 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
 
+                    // Suggested-offset APPLY banner (top). Checked
+                    // before row hit-test so taps on APPLY don't fall
+                    // through to a row.
+                    if (suggested_offset_ms != 0 &&
+                        std::abs((double)suggested_offset_ms - (double)cfg_audio_offset_ms) >= 1.0)
+                    {
+                        float ban_x = 20.0f;
+                        float ban_y = 20.0f;
+                        float ban_w = (float)win_w - 40.0f;
+                        float ban_h = 60.0f;
+                        float ap_x = ban_x + ban_w - 160.0f;
+                        float ap_y = ban_y + 8.0f;
+                        float ap_w = 144.0f;
+                        float ap_h = 44.0f;
+                        if (stx >= ap_x && stx <= ap_x + ap_w &&
+                            sty >= ap_y && sty <= ap_y + ap_h)
+                        {
+                            cfg_audio_offset_ms = (float)suggested_offset_ms;
+                            save_settings();
+                            SDL_Log("OFFSET: applied from settings, new offset=%.0f",
+                                    (double)cfg_audio_offset_ms);
+                            continue;
+                        }
+                        if (stx >= ban_x && stx <= ban_x + ban_w &&
+                            sty >= ban_y && sty <= ban_y + ban_h) {
+                            continue;
+                        }
+                    }
+
                     const float row_x = settings_row_x;
                     const float row_w = (float)win_w - 2.0f * settings_row_x;
                     for (int i = 0; i < ROW_COUNT; i++) {
@@ -2033,6 +2094,7 @@ int main(int argc, char* argv[]) {
                             resume_start_tick = SDL_GetTicks();
                             SDL_Log("RESUME: countdown 3s (continue)");
                         } else if (i == 1) {
+                            record_play_median();
                             // Retry — same as pressing R
                             std::fill(note_judged.begin(),  note_judged.end(),  false);
                             std::fill(note_hit_time.begin(), note_hit_time.end(), -1.0);
@@ -2061,6 +2123,7 @@ int main(int argc, char* argv[]) {
                             paused = false;
                             SDL_Log("PAUSE: retry");
                         } else {
+                            record_play_median();
                             // Return to song select
                             if (audio_stream) {
                                 SDL_ClearAudioStream(audio_stream);
@@ -2367,27 +2430,7 @@ int main(int argc, char* argv[]) {
             // Compute this play's median hit error and update
             // suggested_offset_ms. Median over the last N plays keeps
             // a single bad play from swinging the recommendation.
-            // Formula: suggested = current_offset + median_d, because
-            // d = note.time - map_t (positive = early press); a
-            // positive median means the game clock is reading too
-            // late relative to perception, so advance offset.
-            if (!current_hit_errors.empty()) {
-                std::vector<double> sorted = current_hit_errors;
-                std::sort(sorted.begin(), sorted.end());
-                double med = sorted[sorted.size() / 2];
-                session_medians.push_back(med);
-                if (session_medians.size() > 5)
-                    session_medians.erase(session_medians.begin());
-                std::vector<double> all = session_medians;
-                std::sort(all.begin(), all.end());
-                double session_med = all[all.size() / 2];
-                suggested_offset_ms = (int)std::round(
-                    (double)cfg_audio_offset_ms + session_med);
-                SDL_Log("OFFSET: this=%+.1f  session=%+.1f  suggested=%+d (current=%.0f)",
-                        med, session_med, suggested_offset_ms,
-                        (double)cfg_audio_offset_ms);
-            }
-            current_hit_errors.clear();
+            record_play_median();
 
             result_shown = true;
             if (audio_stream) SDL_PauseAudioStreamDevice(audio_stream);
@@ -3181,6 +3224,45 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
             SDL_RenderDebugText(renderer, 8.0f, (float)win_h / 3.0f - 30.0f, "back");
             SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+
+            // Suggested offset banner — floating at top, mirrors the
+            // result-screen APPLY. Visible only when a suggestion
+            // exists that differs from the current setting.
+            if (suggested_offset_ms != 0 &&
+                std::abs((double)suggested_offset_ms - (double)cfg_audio_offset_ms) >= 1.0)
+            {
+                float ban_x = 20.0f;
+                float ban_y = 20.0f;
+                float ban_w = (float)win_w - 40.0f;
+                float ban_h = 60.0f;
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 25, 30, 50, 230);
+                SDL_FRect ban = { ban_x, ban_y, ban_w, ban_h };
+                SDL_RenderFillRect(renderer, &ban);
+
+                char sb[128];
+                SDL_snprintf(sb, sizeof(sb), "Suggested: %+d ms (%zu play%s)",
+                             suggested_offset_ms, session_medians.size(),
+                             session_medians.size() == 1 ? "" : "s");
+                SDL_SetRenderScale(renderer, 2.0f, 2.0f);
+                SDL_SetRenderDrawColor(renderer, 220, 220, 160, 255);
+                SDL_RenderDebugText(renderer,
+                                    (ban_x + 12.0f) / 2.0f,
+                                    (ban_y + 20.0f) / 2.0f, sb);
+
+                float ap_x = ban_x + ban_w - 160.0f;
+                float ap_y = ban_y + 8.0f;
+                float ap_w = 144.0f;
+                float ap_h = 44.0f;
+                SDL_SetRenderDrawColor(renderer, 40, 90, 130, 255);
+                SDL_FRect ap = { ap_x, ap_y, ap_w, ap_h };
+                SDL_RenderFillRect(renderer, &ap);
+                SDL_SetRenderDrawColor(renderer, 160, 210, 255, 255);
+                SDL_RenderDebugText(renderer,
+                                    (ap_x + 32.0f) / 2.0f,
+                                    (ap_y + 14.0f) / 2.0f, "APPLY");
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            }
         }
         // ---- Song select ----
         if (app_state == AppState::SongSelect) {
