@@ -798,3 +798,11 @@ Reference: ppy/osu ManiaBeatmapConverter.cs + Beatmaps/Patterns/Legacy/*
 An unconverted std map played under mania rules scores the same as a
 native mania map of the same content. What reduces score is applying a
 **Key mod** on top of the conversion (see next section).
+
+## Session Roadmap (Upcoming Features & Bugs)
+
+1. **Video Rendering Bug**: Background video is drawn clipped to the bottom-left instead of scaling/centering properly (see screenshot). Likely `SDL_RenderSetViewport` leaking from previous frame, or a bad `dst` calculation for specific aspect ratios.
+2. **Pause Screen Offset**: Add beatmap-specific offset configuration to the pause menu. It should initialize from the global offset the first time, then save per-map.
+3. **Random Button Logic**: Currently selects a random folder. Fix it to pick a random *difficulty* (weighted by the number of diffs per folder).
+4. **Left Click Plumbing**: Add `SDL_EVENT_MOUSE_BUTTON_DOWN` handling globally so the game can be played/tested with a mouse.
+5. **Song Select Accordion**: Revamp the list. Only the selected beatmap folder expands to show its difficulties. All other folders collapse to just the main title and thumbnail.

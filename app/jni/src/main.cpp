@@ -1776,7 +1776,23 @@ int main(int argc, char* argv[]) {
                     if (!songs.empty()) {
                         static bool rng_seeded = false;
                         if (!rng_seeded) { srand((unsigned)SDL_GetTicks()); rng_seeded = true; }
-                        selected_index = (int)(rand() % (int)songs.size());
+                        std::vector<std::string> unique_folders;
+                        for (const auto& song : songs) {
+                            if (unique_folders.empty() || unique_folders.back() != song.folder)
+                                unique_folders.push_back(song.folder);
+                        }
+                        if (!unique_folders.empty()) {
+                            int rf = rand() % unique_folders.size();
+                            std::string target_folder = unique_folders[rf];
+                            std::vector<int> matching;
+                            for (int i = 0; i < (int)songs.size(); ++i) {
+                                if (songs[i].folder == target_folder)
+                                    matching.push_back(i);
+                            }
+                            if (!matching.empty()) {
+                                selected_index = matching[rand() % matching.size()];
+                            }
+                        }
                         ListGeom lg_r = get_list_geom();
                         float row_top = selected_index * lg_r.row_h;
                         float row_bot = row_top + lg_r.row_h;
@@ -2586,6 +2602,9 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 SDL_SetTextureAlphaMod(bg_tex, 100);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                SDL_SetRenderClipRect(renderer, NULL);
+                SDL_SetRenderViewport(renderer, NULL);
                 SDL_RenderTexture(renderer, bg_tex, NULL, &dst);
             }
         }
@@ -3305,6 +3324,11 @@ int main(int argc, char* argv[]) {
         }
         // ---- Song select ----
         if (app_state == AppState::SongSelect) {
+            // Force clean state for background rendering
+            SDL_SetRenderViewport(renderer, NULL);
+            SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+            SDL_SetRenderClipRect(renderer, NULL);
+
             // BG render — scale-to-cover, then dim overlay
             SDL_SetRenderDrawColor(renderer, 15, 15, 25, 255);
             SDL_FRect bg_full = { 0, 0, (float)win_w, (float)win_h };
@@ -3352,6 +3376,12 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 SDL_SetTextureAlphaMod(bg_tex, 180);
+                SDL_SetRenderScale(renderer, 1.0f, 1.0f);
+                SDL_SetRenderClipRect(renderer, NULL);
+                SDL_SetRenderViewport(renderer, NULL);
+                if (dst.w < 100.0f || dst.h < 100.0f) {
+                    SDL_Log("WARNING: Small dst rect detected! w=%f h=%f", dst.w, dst.h);
+                }
                 SDL_RenderTexture(renderer, bg_tex, NULL, &dst);
 
                 // Slight further dim so list rows stay legible
