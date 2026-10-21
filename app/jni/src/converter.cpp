@@ -49,15 +49,20 @@ int mania_column_count(double drain_rate, double circle_size, double od,
 
 // --- Conversion ---
 
-void convert_to_mania(Beatmap& map, ConvertEmitFn emit) {
+void convert_to_mania(Beatmap& map, ConvertEmitFn emit, int forced_columns) {
     if (map.mode == 3) return;
     if (map.notes.empty()) return;
 
     int total = (int)map.notes.size();
     int sliders = map.slider_count + map.spinner_count;
-    int cols = mania_column_count(
-        map.drain_rate, (double)map.key_count, map.od, map.approach_rate,
-        total, sliders);
+    // forced_columns mirrors ManiaModKey<N>: overrides TargetColumns
+    // without changing the RNG seed (which uses source CircleSize).
+    // Used by the KeyMod test harness; runtime play passes 0.
+    int cols = (forced_columns > 0)
+        ? forced_columns
+        : mania_column_count(
+            map.drain_rate, (double)map.key_count, map.od, map.approach_rate,
+            total, sliders);
 
     int seed = (int)std::round(map.drain_rate + (double)map.key_count) * 20
              + (int)(map.od * 41.2)

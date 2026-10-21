@@ -41,7 +41,12 @@ using ConvertEmitFn = std::function<void(const ConversionEmit&)>;
 // Convert a non-mania Beatmap to mania in place. No-op if already mania.
 // Currently: computes key_count from difficulty, seeds RNG, assigns columns.
 // Not faithful — no pattern generators yet. Playable but not lazer-identical.
-void convert_to_mania(Beatmap& map, ConvertEmitFn emit = nullptr);
+// forced_columns > 0 overrides the difficulty-derived column count with
+// that value, matching ManiaModKey<N> behavior. Seed derivation is
+// unchanged (uses source CircleSize, not forced columns). forced_columns
+// of 0 keeps the auto heuristic — the common case for vanilla converts.
+void convert_to_mania(Beatmap& map, ConvertEmitFn emit = nullptr,
+                      int forced_columns = 0);
 
 // Compute the column count a map WOULD get after conversion (for display
 // in the song-select list without needing to convert). Same as

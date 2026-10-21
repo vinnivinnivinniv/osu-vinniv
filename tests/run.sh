@@ -27,11 +27,17 @@ echo "Running converter comparison against lazer goldens..."
 # matches lazer's output. The *-samples-* goldens (e.g.
 # spinner-convert-samples) use a different schema for sample-fidelity
 # testing and are not usable with the Mappings consumer.
+#
+# KeyMod (forced-column) verification is NOT covered here. Lazer's NK.osu
+# fixtures are all Mode:3 (already mania), so ManiaModKey<N> is a no-op
+# against them (IsForCurrentRuleset short-circuit). Their goldens capture
+# pass-through behavior, not conversion. To verify KeyMod we would need
+# Mode:0 source maps with matching NK goldens generated from
+# ManiaModKey<N>. Deferred until KeyMod ships as a runtime feature.
 CORE_MAPS="
 20544
 100374
 1450162
-spinner-convert-samples
 "
 
 DATA_DIR=data/mania_conversion
@@ -52,8 +58,26 @@ for base in $CORE_MAPS; do
         continue
     fi
 
-    if ! ./test_converter "$osu" > "$TMP/${base}-ours.txt" 2>"$TMP/${base}-err.txt"; then
-        echo "FAIL: ${base} (parse or convert error)"
+    # If the filename ends in NK (1K, 4K, 7K, 10K), pass that as
+    # forced_columns to simulate ManiaModKey<N>. Otherwise auto heuristic.
+    cols=""
+    if [[ "$base" =~ ^([0-9]+)K$ ]]; then
+        cols="${BASH_REMATCH[1]}"
+    fi
+
+    local_rc=0
+    if [ -n "$cols" ]; then
+        ./test_converter "$osu" "$cols" > "$TMP/${base}-ours.txt" 2>"$TMP/${base}-err.txt" || local_rc=$?
+    else
+        ./test_converter "$osu" > "$TMP/${base}-ours.txt" 2>"$TMP/${base}-err.txt" || local_rc=$?
+    fi
+
+    if [ "$local_rc" -eq 4 ]; then
+        echo "SKIP: ${base} (mania map + forced_columns)"
+        skip_count=$((skip_count + 1))
+        continue
+    elif [ "$local_rc" -ne 0 ]; then
+        echo "FAIL: ${base} (parse or convert error, rc=$local_rc)"
         sed 's/^/    /' "$TMP/${base}-err.txt" | head -3
         fail_count=$((fail_count + 1))
         continue

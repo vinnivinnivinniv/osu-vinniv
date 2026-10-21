@@ -19,15 +19,26 @@ extern "C" void SDL_Log(const char* fmt, ...) { (void)fmt; }
 #include "../app/jni/src/converter_legacy.cpp"
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::fprintf(stderr, "usage: %s <file.osu>\n", argv[0]);
+    if (argc < 2 || argc > 3) {
+        std::fprintf(stderr, "usage: %s <file.osu> [forced_columns]\n", argv[0]);
         return 2;
     }
+    int forced_columns = 0;
+    if (argc == 3) forced_columns = std::atoi(argv[2]);
 
     Beatmap map;
     if (!parse_osu_file(argv[1], map, /*metadata_only=*/false)) {
         std::fprintf(stderr, "parse failed: %s\n", argv[1]);
         return 1;
+    }
+
+    // Forced-columns test on an already-mania map exercises "mod apply"
+    // semantics (TargetColumns is a no-op when IsForCurrentRuleset). That
+    // is a different test class; skip here so run.sh doesn't count it
+    // as a conversion failure.
+    if (map.mode == 3 && forced_columns > 0) {
+        std::fprintf(stderr, "SKIP: mania map with forced_columns=%d\n", forced_columns);
+        return 4;
     }
 
     // Diagnostic: what does our column heuristic actually compute?
