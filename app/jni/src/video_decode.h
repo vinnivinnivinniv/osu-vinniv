@@ -25,6 +25,8 @@ struct VideoFrame {
 
     int            width  = 0;
     int            height = 0;
+    int            sar_num = 1;
+    int            sar_den = 1;
     double         pts_ms = 0.0;
     bool           is_yuv = false;
 };

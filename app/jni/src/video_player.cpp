@@ -101,6 +101,8 @@ void VideoPlayer::tick() {
         tex_w_ = w;
         tex_h_ = h;
         tex_is_yuv_ = is_yuv;
+        tex_ar_ = (float)w / h;
+        if (frame_sar_num_ > 0 && frame_sar_den_ > 0) { tex_ar_ = (float)w * frame_sar_num_ / (h * frame_sar_den_); }
         upload_tex = textures_[upload_idx];
     }
 

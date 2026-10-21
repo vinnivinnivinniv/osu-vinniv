@@ -564,8 +564,7 @@ int main(int argc, char* argv[]) {
             std::vector<double> all = session_medians;
             std::sort(all.begin(), all.end());
             double session_med = all[all.size() / 2];
-            suggested_offset_ms = (int)std::round(
-                (double)cfg_audio_offset_ms + session_med);
+            suggested_offset_ms = (int)std::round((double)cfg_audio_offset_ms - session_med);
             SDL_Log("OFFSET: this=%+.1f  session=%+.1f  suggested=%+d (current=%.0f)",
                     med, session_med, suggested_offset_ms,
                     (double)cfg_audio_offset_ms);
@@ -936,6 +935,7 @@ int main(int argc, char* argv[]) {
     // Settings state
     bool  settings_dirty = false;
     int   settings_row   = -1;      // which row is being dragged, -1 = none
+    int settings_page = 0; // 0 = Audio/Game, 1 = Mods/Keys
     int   capture_nk     = 0;       // 0 = not capturing, else target key count
     std::vector<SDL_Keycode> capture_progress;
     int   settings_fps_preset = 0;  // 0=60, 1=120, 2=240, 3=0 (uncapped)
@@ -1197,7 +1197,7 @@ int main(int argc, char* argv[]) {
                 std::sort(sorted.begin(), sorted.end());
                 actual_median_d = sorted[sorted.size() / 2];
             }
-            double actual_suggested = (double)cfg_audio_offset_ms + actual_median_d;
+            double actual_suggested = (double)cfg_audio_offset_ms - actual_median_d;
 
             bool median_ok = std::abs(actual_median_d - expected_d) < 0.5;
             bool formula_ok = std::abs(actual_suggested - expected_suggested) < 0.5;
@@ -1995,6 +1995,15 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
 
+                    // Page toggle button
+                    if (stx > (float)win_w - 260.0f && sty > (float)win_h - 80.0f &&
+                        sty < (float)win_h - 20.0f) {
+                        settings_page = (settings_page == 0) ? 1 : 0;
+                        settings_row = -1; // cancel any active drag
+                        SDL_Log("SETTINGS: page switched to %d", settings_page);
+                        continue;
+                    }
+
                     // Suggested-offset APPLY banner (top). Checked
                     // before row hit-test so taps on APPLY don't fall
                     // through to a row.
@@ -2026,8 +2035,11 @@ int main(int argc, char* argv[]) {
 
                     const float row_x = settings_row_x;
                     const float row_w = (float)win_w - 2.0f * settings_row_x;
-                    for (int i = 0; i < ROW_COUNT; i++) {
-                        float ry = settings_row_y0 + i * (settings_row_h + settings_row_gap);
+                    int start_row = (settings_page == 0) ? 0 : 7;
+                    int end_row = (settings_page == 0) ? 7 : ROW_COUNT;
+                    for (int i = start_row; i < end_row; i++) {
+                        int visual_idx = i - start_row;
+                        float ry = settings_row_y0 + visual_idx * (settings_row_h + settings_row_gap);
                         if (stx >= row_x && stx <= row_x + row_w &&
                             sty >= ry && sty <= ry + settings_row_h) {
                             if (setting_rows[i].type == 2) {
@@ -2535,27 +2547,43 @@ int main(int argc, char* argv[]) {
         {
             SDL_Texture* bg_tex = nullptr;
             int bg_w = 0, bg_h = 0;
+            float bg_ar = 0.0f;
+            bool is_video = false;
             if (song_video.ready()) {
                 bg_tex = song_video.current_texture();
                 bg_w = song_video.texture_w();
                 bg_h = song_video.texture_h();
+                bg_ar = song_video.texture_aspect_ratio();
+                is_video = true;
             } else if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
                 bg_tex = song_bg_tex;
                 bg_w = song_bg_w;
                 bg_h = song_bg_h;
+                bg_ar = (float)bg_w / bg_h;
             }
             if (bg_tex && bg_w > 0 && bg_h > 0) {
-                float tex_ar = (float)bg_w / bg_h;
                 float win_ar = (float)win_w / win_h;
                 SDL_FRect dst;
-                if (win_ar > tex_ar) {
-                    float w = (float)win_w;
-                    float h = w / tex_ar;
-                    dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                if (is_video) {
+                    if (win_ar > bg_ar) {
+                        float h = (float)win_h;
+                        float w = h * bg_ar;
+                        dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                    } else {
+                        float w = (float)win_w;
+                        float h = w / bg_ar;
+                        dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                    }
                 } else {
-                    float h = (float)win_h;
-                    float w = h * tex_ar;
-                    dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                    if (win_ar > bg_ar) {
+                        float w = (float)win_w;
+                        float h = w / bg_ar;
+                        dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                    } else {
+                        float h = (float)win_h;
+                        float w = h * bg_ar;
+                        dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                    }
                 }
                 SDL_SetTextureAlphaMod(bg_tex, 100);
                 SDL_RenderTexture(renderer, bg_tex, NULL, &dst);
@@ -3142,9 +3170,12 @@ int main(int argc, char* argv[]) {
             const float row_x = settings_row_x;
             const float row_w = (float)win_w - 2.0f * settings_row_x;
 
-            for (int i = 0; i < ROW_COUNT; i++) {
+            int start_row = (settings_page == 0) ? 0 : 7;
+            int end_row = (settings_page == 0) ? 7 : ROW_COUNT;
+            for (int i = start_row; i < end_row; i++) {
                 const auto& row = setting_rows[i];
-                float ry = settings_row_y0 + i * (settings_row_h + settings_row_gap);
+                int visual_idx = i - start_row;
+                float ry = settings_row_y0 + visual_idx * (settings_row_h + settings_row_gap);
                 bool capturing_this = (row.type == 2 && capture_nk == row.key_count);
 
                 // Row background
@@ -3223,6 +3254,14 @@ int main(int argc, char* argv[]) {
             SDL_SetRenderScale(renderer, 3.0f, 3.0f);
             SDL_SetRenderDrawColor(renderer, 200, 200, 100, 255);
             SDL_RenderDebugText(renderer, 8.0f, (float)win_h / 3.0f - 30.0f, "back");
+            
+            // Page toggle button (bottom-right)
+            SDL_SetRenderDrawColor(renderer, 60, 80, 120, 255);
+            SDL_FRect page_btn = { (float)win_w - 260.0f, (float)win_h - 80.0f, 240.0f, 60.0f };
+            SDL_RenderFillRect(renderer, &page_btn);
+            SDL_SetRenderDrawColor(renderer, 200, 220, 255, 255);
+            SDL_RenderDebugText(renderer, ((float)win_w - 200.0f) / 3.0f, ((float)win_h - 60.0f) / 3.0f, 
+                                settings_page == 0 ? "Next: Mods/Keys" : "Next: Audio/Game");
             SDL_SetRenderScale(renderer, 1.0f, 1.0f);
 
             // Suggested offset banner — floating at top, mirrors the
@@ -3274,27 +3313,43 @@ int main(int argc, char* argv[]) {
             // Prefer video texture if ready; fall back to static bg.
             SDL_Texture* bg_tex = nullptr;
             int bg_w = 0, bg_h = 0;
+            float bg_ar = 0.0f;
+            bool is_video = false;
             if (song_video.ready()) {
                 bg_tex = song_video.current_texture();
                 bg_w = song_video.texture_w();
                 bg_h = song_video.texture_h();
+                bg_ar = song_video.texture_aspect_ratio();
+                is_video = true;
             } else if (song_bg_tex && song_bg_w > 0 && song_bg_h > 0) {
                 bg_tex = song_bg_tex;
                 bg_w = song_bg_w;
                 bg_h = song_bg_h;
+                bg_ar = (float)bg_w / bg_h;
             }
             if (bg_tex && bg_w > 0 && bg_h > 0) {
-                float tex_ar = (float)bg_w / bg_h;
                 float win_ar = (float)win_w / win_h;
                 SDL_FRect dst;
-                if (win_ar > tex_ar) {
-                    float w = (float)win_w;
-                    float h = w / tex_ar;
-                    dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                if (is_video) {
+                    if (win_ar > bg_ar) {
+                        float h = (float)win_h;
+                        float w = h * bg_ar;
+                        dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                    } else {
+                        float w = (float)win_w;
+                        float h = w / bg_ar;
+                        dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                    }
                 } else {
-                    float h = (float)win_h;
-                    float w = h * tex_ar;
-                    dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                    if (win_ar > bg_ar) {
+                        float w = (float)win_w;
+                        float h = w / bg_ar;
+                        dst = { 0.0f, (win_h - h) * 0.5f, w, h };
+                    } else {
+                        float h = (float)win_h;
+                        float w = h * bg_ar;
+                        dst = { (win_w - w) * 0.5f, 0.0f, w, h };
+                    }
                 }
                 SDL_SetTextureAlphaMod(bg_tex, 180);
                 SDL_RenderTexture(renderer, bg_tex, NULL, &dst);

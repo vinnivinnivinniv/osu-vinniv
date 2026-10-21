@@ -34,6 +34,7 @@ struct VideoPlayer {
     SDL_Texture* current_texture() const { return textures_[tex_index_]; }
     int  texture_w() const { return tex_w_; }
     int  texture_h() const { return tex_h_; }
+    float texture_aspect_ratio() const { return tex_ar_; }
 
     // True if at least one frame has been uploaded to the texture.
     bool ready() const { return ready_.load(); }
@@ -70,6 +71,7 @@ private:
     std::vector<uint8_t> upload_data_;  // main drains here; swaps with frame_data_
     int                  frame_w_ = 0;
     int                  frame_h_ = 0;
+    int frame_sar_num_ = 1, frame_sar_den_ = 1;
     bool                 frame_pending_ = false;
 
     // YUV metadata (only valid when frame_is_yuv_ is true)
@@ -90,6 +92,7 @@ private:
     int          tex_index_  = 0;                      // which we rendered last
     int          tex_w_ = 0;
     int          tex_h_ = 0;
+    float tex_ar_ = 1.0f;
 };
 
 // Test-only. Creates a VideoPlayer, requests the given file, ticks for

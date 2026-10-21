@@ -163,8 +163,9 @@ int video_decoder_read_frame(VideoDecoder* d, VideoFrame* out) {
                 out->stride_y   = sy;
                 out->stride_u   = su;
                 out->stride_v   = sv;
-                out->width      = w;
-                out->height     = h;
+                out->width = w;
+                out->height = h;
+                { AVRational sar = d->frame->sample_aspect_ratio; if(sar.num == 0) sar = d->codec->sample_aspect_ratio; out->sar_num = (sar.num > 0) ? sar.num : 1; out->sar_den = (sar.den > 0) ? sar.den : 1; }
                 out->pts_ms     = (double)(ts - start) * d->time_base_ms;
                 out->data_rgba  = nullptr;
                 out->stride_rgba = 0;
@@ -209,8 +210,9 @@ int video_decoder_read_frame(VideoDecoder* d, VideoFrame* out) {
             out->is_yuv     = false;
             out->data_rgba  = d->out_buf;
             out->stride_rgba = d->out_stride;
-            out->width      = w;
-            out->height     = h;
+            out->width = w;
+                out->height = h;
+                { AVRational sar = d->frame->sample_aspect_ratio; if(sar.num == 0) sar = d->codec->sample_aspect_ratio; out->sar_num = (sar.num > 0) ? sar.num : 1; out->sar_den = (sar.den > 0) ? sar.den : 1; }
 
             av_frame_unref(d->frame);
             return 1;
